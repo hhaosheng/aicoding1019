@@ -57,30 +57,30 @@ func run(args []string) int {
 		}
 		fmt.Fprintf(os.Stderr, "bannerctl: %v\n\n", err)
 		usage(os.Stderr)
-		return 2
+		return 1
 	}
 
 	items, err := readItems(cfg.Input)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bannerctl: %v\n", err)
-		return 1
+		return 2
 	}
 	if len(items) == 0 {
 		fmt.Fprintln(os.Stderr, "bannerctl: 输入里没有任何记录")
-		return 1
+		return 2
 	}
 
 	start := time.Now()
 	results, err := recognize(cfg, items)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bannerctl: %v\n", err)
-		return 1
+		return 2
 	}
 	elapsed := time.Since(start)
 
 	if err := render(os.Stdout, cfg.Format, results); err != nil {
 		fmt.Fprintf(os.Stderr, "bannerctl: 输出失败: %v\n", err)
-		return 1
+		return 2
 	}
 
 	identified, unknown := 0, 0
@@ -102,7 +102,7 @@ func run(args []string) int {
 		// 但 CI 里往往想断言「这批数据必须全部认出来」。--strict 把这件事
 		// 变成一个显式的、默认关闭的选择，而不是悄悄改变默认语义。
 		fmt.Fprintf(os.Stderr, "bannerctl: --strict 生效：存在 %d 条 unknown\n", unknown)
-		return 2
+		return 3
 	}
 	return 0
 }
@@ -304,7 +304,13 @@ func usage(w io.Writer) {
   -concurrency int     并发批次数（默认 4）
   -timeout duration    单次请求超时（默认 60s）
   -debug               请求服务端返回诊断负载（命中规则与候选列表）
-  -strict              只要存在 unknown 就以退出码 2 结束
+  -strict              只要存在 unknown 就以退出码 3 结束
+
+退出码:
+  0  成功
+  1  用法错误
+  2  输入文件、传输或服务端错误
+  3  -strict 生效且结果中存在 unknown
 
 输入格式（两种都接受）:
   [{"ip":"1.2.3.4","port":22,"banner":"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"}]

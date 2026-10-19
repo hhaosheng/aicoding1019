@@ -139,7 +139,7 @@ func ParseClient(args []string, usage Usage) (Client, error) {
 		batch  = fs.Int("batch-size", 500, "每批发送的记录数")
 		conc   = fs.Int("concurrency", 4, "并发发送的批次数")
 		debug  = fs.Bool("debug", false, "请求服务端返回诊断负载并打印")
-		strict = fs.Bool("strict", false, "只要存在 unknown 就以退出码 2 结束（供 CI 断言用）")
+		strict = fs.Bool("strict", false, "只要存在 unknown 就以退出码 3 结束（供 CI 断言用）")
 	)
 
 	if err := fs.Parse(args); err != nil {
