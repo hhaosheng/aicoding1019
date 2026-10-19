@@ -8,13 +8,14 @@
     单元测试只能证明引擎在宿主机上是对的；这里证明的是「构建 → 编排 → 健康门禁 →
     容器间调用 → 识别深度」这一整条交付链是通的。
 
-    它按顺序做六件事，任一步失败立刻以非 0 退出：
+    它按顺序做七件事，任一步失败立刻以非 0 退出：
       1. docker compose --profile run build
       2. docker compose up -d --wait（--wait 会等到 healthcheck 通过）
       3. 在 server 容器内跑 bannerd healthcheck（scratch 里没有 curl，只能自证）
       4. 通过 client 容器发起批量识别（client → backend 网络 → server:8080）
       5. 断言验收样例的 7 行逐字段命中，以及 20 条的条数/顺序/unknown 计数
-      6. 默认清理容器
+      6. 换一个规则目录再起一台 server，证明识别能力来自规则文件而不是代码
+      7. 默认清理容器
 
 .PARAMETER KeepUp
     验收结束后不拆除容器，方便接着手工排查。
@@ -121,22 +122,22 @@ function Invoke-Compose {
 
 try {
     if (-not $SkipBuild) {
-        Write-Step '1/6 构建镜像（多阶段：src → test → build → scratch）'
+        Write-Step '1/7 构建镜像（多阶段：src → test → build → scratch）'
         # client 服务带 profiles: ["run"]，不属于默认 profile。不显式 --profile run
         # 的话 `compose build` 只会构建 server 镜像，client 镜像要等到 `compose run`
         # 时才临时补建 —— 那会让"构建阶段"变得不可预测，所以这里显式把它带进来。
         Invoke-Compose -ComposeArgs @('--profile', 'run', 'build') | Out-Null
     }
     else {
-        Write-Step '1/6 跳过构建（-SkipBuild）'
+        Write-Step '1/7 跳过构建（-SkipBuild）'
     }
 
-    Write-Step "2/6 启动编排并等待健康（上限 ${TimeoutSeconds}s）"
+    Write-Step "2/7 启动编排并等待健康（上限 ${TimeoutSeconds}s）"
     Invoke-Compose -ComposeArgs @('up', '-d', '--wait', '--wait-timeout', "$TimeoutSeconds") | Out-Null
     $ps = Invoke-Compose -ComposeArgs @('ps')
     $ps.TrimEnd() -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
 
-    Write-Step '3/6 server 自证健康（scratch 镜像里没有 curl，只有 bannerd 自己能探）'
+    Write-Step '3/7 server 自证健康（scratch 镜像里没有 curl，只有 bannerd 自己能探）'
     $hc = Invoke-Native -Exe 'docker' -Arguments @(
         'compose', 'exec', '-T', 'server',
         '/usr/local/bin/bannerd', 'healthcheck', '--url', 'http://127.0.0.1:8080/health'
@@ -144,7 +145,7 @@ try {
     $hc.Output.TrimEnd() -split "`r?`n" | ForEach-Object { Write-Host "    $_" }
     Assert-That 'healthcheck 退出码为 0' ($hc.ExitCode -eq 0) "退出码 $($hc.ExitCode)"
 
-    Write-Step '4/6 经 client 容器发起批量识别（唯一跨容器路径）'
+    Write-Step '4/7 经 client 容器发起批量识别（唯一跨容器路径）'
     $run = Invoke-Native -StdoutOnly -Exe 'docker' -Arguments @(
         'compose', 'run', '--rm', '-T', 'client',
         '--input', '/data/sample_input.json', '--format', 'json'
@@ -163,7 +164,7 @@ try {
     if ($null -eq $parsed) { throw 'client 输出的 JSON 解析为 null' }
     $results = @($parsed)
 
-    Write-Step '5/6 断言识别深度'
+    Write-Step '5/7 断言识别深度'
     Assert-That '结果条数与输入一致（20 条，顺序不变）' ($results.Count -eq 20) "实际 $($results.Count)"
 
     $identified = @($results | Where-Object { $_.protocol -ne 'unknown' })
@@ -209,7 +210,71 @@ try {
     Write-Host "    $($shaLine.Trim())"
     Assert-That '内置规则集指纹可用（64 位十六进制）' ($shaLine -match 'sha256=[0-9a-f]{64}') $shaLine
 
-    Write-Step '6/6 收尾'
+    # ------------------------------------------------------------ 6/7 解耦验证
+    #
+    # 「识别规则与程序代码解耦」这句主张，如果不演示，就只是一句主张。
+    # 这里用**同一份不可变镜像**再起一台 server，唯一区别是规则目录换成了
+    # examples/rules-override/，于是样例里唯一那条 unknown 被认了出来。
+    # 全程不编译、不重建镜像、不碰一行 Go 代码。
+    Write-Step '6/7 规则与代码解耦验证：同一份镜像，换规则目录，不重新编译'
+    $demoNet = 'bannerd-verify-demo'
+    $demoCtr = 'bannerd-verify-demo'
+    Invoke-Native -Exe 'docker' -Arguments @('rm', '-f', $demoCtr) | Out-Null
+    Invoke-Native -Exe 'docker' -Arguments @('network', 'rm', $demoNet) | Out-Null
+    try {
+        $null = Invoke-Native -Exe 'docker' -Arguments @('network', 'create', $demoNet)
+        $started = Invoke-Native -Exe 'docker' -Arguments @(
+            'run', '--rm', '-d', '--name', $demoCtr, '--network', $demoNet,
+            '-v', (Join-Path $RepoRoot 'examples/rules-override' | ForEach-Object { "${_}:/rules:ro" }),
+            'bannerd-server:dev', '--rules-dir', '/rules'
+        )
+        if ($started.ExitCode -ne 0) { throw "起演示容器失败：$($started.Output)" }
+
+        # 等就绪用镜像自带的 healthcheck 子命令轮询，不靠 sleep 猜。
+        $ready = $false
+        $probeOut = ''
+        for ($i = 0; $i -lt 40; $i++) {
+            $probe = Invoke-Native -Exe 'docker' -Arguments @(
+                'exec', $demoCtr, '/usr/local/bin/bannerd', 'healthcheck', '--url', 'http://127.0.0.1:8080/health'
+            )
+            if ($probe.ExitCode -eq 0) { $ready = $true; $probeOut = $probe.Output; break }
+            Start-Sleep -Milliseconds 250
+        }
+        Assert-That '挂了外部规则目录的 server 自检仍然 6/6' $ready '2 秒内没健康起来'
+        Assert-That '规则来源指向挂载目录' ($probeOut -match '"source":"/rules"') $probeOut
+        # 新增 pack 而不是替换：内置 9 个 pack 一个不少，只是多了一个。
+        Assert-That 'pack 数 9 → 10（是新增，不是顶掉内置）' ($probeOut -match '"packs":10') $probeOut
+
+        $demoSha = if ($probeOut -match 'sha256":"([0-9a-f]{64})') { $Matches[1] } else { '' }
+        $builtinSha = if ($shaLine -match 'sha256=([0-9a-f]{64})') { $Matches[1] } else { '' }
+        Assert-That '规则指纹随之改变（换了规则，凭据就必须变）' `
+            (($demoSha.Length -eq 64) -and ($demoSha -ne $builtinSha)) "demo=$demoSha builtin=$builtinSha"
+
+        $demoCsv = Invoke-Native -StdoutOnly -Exe 'docker' -Arguments @(
+            'run', '--rm', '--network', $demoNet,
+            '-v', (Join-Path $RepoRoot 'testdata' | ForEach-Object { "${_}:/data:ro" }),
+            'bannerd-client:dev', '--input', '/data/sample_input.json',
+            '--server', "http://${demoCtr}:8080", '--format', 'csv'
+        )
+        $rows = @($demoCsv.Stdout.Trim() -split "`r?`n" | Where-Object { $_ })
+        Assert-That '样例 #20 由 unknown 变为 Demo/QuitEcho @0.70' `
+            ($rows -contains '1.2.3.23,12345,Demo,QuitEcho,,,0.70') "实际：$($rows[-1])"
+
+        # 新增规则只应"多认出来一条"，不该扰动任何已有结论。
+        $drift = @()
+        foreach ($r in $results) {
+            if ($r.ip -eq '1.2.3.23') { continue }
+            $wantRow = '{0},{1},{2},{3},{4},{5},{6:F2}' -f $r.ip, $r.port, $r.protocol, $r.product, $r.version, $r.os_hint, $r.confidence
+            if (-not ($rows -contains $wantRow)) { $drift += $wantRow }
+        }
+        Assert-That '其余 19 条结论一字未改（只增不改）' ($drift.Count -eq 0) ("漂移 $($drift.Count) 行")
+    }
+    finally {
+        Invoke-Native -Exe 'docker' -Arguments @('rm', '-f', $demoCtr) | Out-Null
+        Invoke-Native -Exe 'docker' -Arguments @('network', 'rm', $demoNet) | Out-Null
+    }
+
+    Write-Step '7/7 收尾'
     if ($KeepUp) {
         Write-Host '    -KeepUp 已指定，容器保留。停止：docker compose down'
     }

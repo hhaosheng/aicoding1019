@@ -1,0 +1,53 @@
+# 外部规则目录示例
+#
+# 这个目录只有一个用途：让人**亲眼看到**识别能力来自规则文件，而不是来自代码。
+#
+# ## 它演示什么
+#
+# 内置规则刻意不认样例里的第 20 条报文（`1.2.3.23:12345` 的 `QUIT`）——
+# 一条孤零零的纯文本命令，没有任何可交叉验证的产品/版本线索，报了也是猜。
+# 这个目录往规则集里**新增**一个 pack 来认它。全程不碰一行 Go 代码、
+# 不重新编译、不重建镜像。
+#
+# ## 怎么跑
+#
+#   ./scripts/verify.sh            # Windows: ./scripts/verify.ps1
+#
+# 验收脚本的第 6 步会自动做一遍。手动做是这几条：
+#
+#   docker network create bannerd-demo-net
+#   docker run --rm -d --name bannerd-demo --network bannerd-demo-net \
+#     -v "$PWD/examples/rules-override:/rules:ro" \
+#     bannerd-server:dev --rules-dir /rules
+#   docker run --rm --network bannerd-demo-net -v "$PWD/testdata:/data:ro" \
+#     bannerd-client:dev --input /data/sample_input.json \
+#     --server http://bannerd-demo:8080 --format csv
+#
+# 把最后一条的输出和内置规则时的输出对一下：`1.2.3.23,12345,unknown,,,,0.00`
+# 会变成 `1.2.3.23,12345,Demo,QuitEcho,,,0.70`，其余 19 行一字不改。
+#
+# ## 覆盖语义
+#
+# `-rules-dir` 是**整文件替换**，不是逐条合并：外部目录里出现 `ssh.yaml`，
+# 内置的 ssh pack 就整个被它顶掉（哪怕它只有一条规则）；换成没见过的文件名，
+# 就是新增一个 pack。这样"改了哪几个文件"和"规则集变成了什么样"是同一件事，
+# 不会出现"我以为只加了三条、其实悄悄少了十条"的半覆盖状态。
+#
+# 也正因为是整文件替换，挂一个只认自家实现的 `ssh.yaml` 进来会让 `/health`
+# 的探针失败并返回 503 —— 那是刻意设计的：换规则是允许的，换坏了必须被立刻看见。
+version: 1
+pack: demo
+protocol: Demo
+ports: [12345]
+description: "演示用外部规则包：给样例里唯一认不出来的那条报文补一条规则"
+rules:
+  - id: demo.quit
+    description: "纯文本 QUIT 握手（样例 #20）"
+    specificity: 70
+    match:
+      - regex: '(?i)^QUIT\r?\n?$'
+    product: QuitEcho
+    # 只有一个固定字符串可用，没有任何版本线索，所以上限压到 0.70：
+    # 0.60(protocol) + 0.15(product) + 0.05(端口相符) = 0.80，被 0.70 的
+    # ceiling_no_version 截住。这个数字完全由本文件决定，代码里没有这一档。
+    score: {ceiling: 0.70, ceiling_no_version: 0.70}
