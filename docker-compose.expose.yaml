@@ -1,0 +1,25 @@
+# ============================================================================
+# docker-compose.expose.yaml —— 仅供本地人工验证的叠加 override（默认形态之外的能力）。
+#
+# 默认形态刻意是"锁死"的：server 不发布端口、backend 网络 internal: true，
+# 因此宿主机无法直接访问 8080（跨容器唯一路径是服务名 DNS）。
+# 需要从宿主机 curl / 浏览器直接打 8080 时，显式叠加本文件 —— 暴露永远不是默认行为。
+#
+# 用法（端口只绑回环 127.0.0.1，绝不写 0.0.0.0，避免暴露到局域网）：
+#   docker compose -f docker-compose.yaml -f docker-compose.expose.yaml up -d
+#   curl http://127.0.0.1:8080/health
+#   docker compose -f docker-compose.yaml -f docker-compose.expose.yaml down -v
+#
+# 为什么额外接一条 hostaccess 网络：internal: true 的网络上容器没有对外路由，
+# 端口发布要靠宿主机侧代理转发，行为随平台与 userland-proxy 配置而变；
+# 多接一条普通 bridge 网络，能让"发布端口"在任何环境下都确定可用。
+# 它不影响默认形态的收敛性 —— 本文件只在你显式叠加时生效。
+# ============================================================================
+services:
+  server:
+    networks: [backend, hostaccess]
+    ports: ["127.0.0.1:8080:8080"]   # 只绑回环：宿主机可达，局域网不可达
+
+networks:
+  hostaccess:
+    driver: bridge

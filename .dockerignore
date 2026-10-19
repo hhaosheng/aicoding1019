@@ -1,0 +1,47 @@
+# .dockerignore —— 收敛构建上下文，同时**刻意不排除**构建必需的内容。
+#
+# 关键：vendor/ 必须留在上下文里。本机 Docker Hub 直连不可达、proxy.golang.org 也不可达，
+# 构建链靠 `-mod=vendor` + `GOTOOLCHAIN=local` 做到零网络；一旦把 vendor/ 忽略掉，
+# 构建就会退化成"需要联网 go mod download"，直接失败。
+# 同理 rules/（go:embed 规则数据）、testdata/（构建期单测的黄金文件）、
+# go.mod / go.sum / cmd/ / internal/ 都必须保留。
+
+# —— 版本控制与文档：构建不需要 ——
+.git
+.gitignore
+.gitattributes
+plan.md
+README.md
+*.md
+
+# —— 本文件与容器描述文件：构建不需要进上下文 ——
+Dockerfile
+Dockerfile.*
+.dockerignore
+docker-compose*.yaml
+docker-compose*.yml
+
+# —— 其他代理自己的产物：不进构建上下文 ——
+api/
+scripts/
+
+# —— 编辑器 / 操作系统垃圾 ——
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# —— 构建产物与本地临时文件 ——
+bin/
+dist/
+*.exe
+*.test
+coverage.out
+coverage.html
+out.json
+.tmp/
+tmp/
+*.log

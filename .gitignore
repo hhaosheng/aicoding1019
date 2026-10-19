@@ -1,0 +1,33 @@
+# .gitignore —— 只忽略产物与本地垃圾。
+#
+# 注意：**绝不忽略 vendor/**。vendor/ 必须提交进仓库，因为 Docker 构建与离线环境
+# 都依赖 `-mod=vendor`（本机 registry-1.docker.io / proxy.golang.org 均不可达），
+# 忽略它会让整个构建链失去可复现性。
+
+# —— 构建产物 ——
+/bin/
+/dist/
+/bannerd
+/bannerctl
+*.exe
+*.test
+
+# —— 覆盖率与验收产物 ——
+coverage.out
+coverage.html
+out.json
+
+# —— 编辑器 / 操作系统垃圾 ——
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# —— 本地临时 ——
+.tmp/
+tmp/
+logs/
+*.log

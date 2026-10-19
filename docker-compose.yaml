@@ -1,0 +1,115 @@
+# ============================================================================
+# docker-compose.yaml —— 默认形态：把"容器间访问方式"与"运行权限"收得最紧。
+#
+# 访问收敛（评估点 1）：
+#   · server 刻意不写 ports: —— 不向宿主机发布任何端口；
+#   · 只有一条用户自定义网络 backend，且 internal: true（无出网、无宿主入口）；
+#   · client → server 是唯一一条跨容器路径：http://server:8080（compose 服务名 DNS）。
+#
+# 权限收紧（评估点 4）：非 root 数字 UID 65532、只读根文件系统 + tmpfs /tmp、
+# cap_drop ALL、no-new-privileges、pids_limit、CPU/内存限额、日志轮转、
+# stop_grace_period 配合 SIGTERM 优雅停机。
+#
+# 用法：
+#   docker compose up -d --wait          # 只起 server 并等它 healthy
+#   docker compose run --rm client       # 一次性跑批处理 client（profiles: run）
+#   docker compose down -v               # 停止并清理
+# 需要从宿主机直接访问 8080 做人工验证时，显式叠加 override：
+#   docker compose -f docker-compose.yaml -f docker-compose.expose.yaml up -d
+# ============================================================================
+name: bannerd
+
+# 两个服务共用的收紧模板：写成锚点，避免逐项复制时漏配某一项
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  tmpfs: ["/tmp:noexec,nosuid,size=16m"]   # 唯一可写点，且不可执行
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"    # 日志轮转：防止写爆宿主磁盘
+      max-file: "3"
+
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: server
+      args:
+        VERSION: "0.1.0"
+        GIT_SHA: "${GIT_SHA:-unknown}"
+    image: bannerd-server:dev
+    container_name: bannerd-server
+    <<: *hardening
+    user: "65532:65532"                     # 非 root 数字 UID，scratch 里无 passwd 也无所谓
+    environment:
+      BANNERD_LISTEN: "0.0.0.0:8080"
+      BANNERD_LOG_FORMAT: json
+      BANNERD_LOG_LEVEL: info
+    networks: [backend]
+    # 刻意不写 ports: —— 不向宿主机发布任何端口；唯一入口是 backend 网络内的服务名 DNS。
+    pids_limit: 128                          # 限制 fork 炸弹
+    stop_grace_period: 10s                   # 给在途请求排空的时间，不做硬杀
+    healthcheck:
+      # 运行时是 scratch：容器里没有 curl / wget / sh，健康检查只能由二进制自证。
+      # bannerd healthcheck 请求 /health，该端点会实时跑 6 条探针 banner 过一遍识别引擎并断言；
+      # 规则被改坏 → 503 → 退出码非 0 → 容器 unhealthy → client 的 service_healthy 不放行。
+      test: ["CMD", "/usr/local/bin/bannerd", "healthcheck", "--url", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 3s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 128M
+          # 本机 Compose v5.3.0 会把 pids_limit 归一化到 deploy.resources.limits.pids，
+          # 两处取值不一致时 config 直接报 "can't set distinct values"，故这里显式写同值。
+          pids: 128
+    # —— 规则目录挂载：默认关闭（可选演示）——
+    # 默认规则通过 go:embed 编进二进制：镜像自包含、可复现，空镜像即可跑，所以这里不挂载。
+    # 要演示"规则与代码解耦：改 YAML 不用重新编译镜像"，把下面 volumes 与 command 两处注释
+    # 一起取消即可：外部目录中同名 pack 整文件覆盖内置 pack，目录内新增文件追加为额外 pack。
+    # volumes:
+    #   - ./rules:/etc/bannerd/rules:ro
+    # command: ["--addr", ":8080", "--rules-dir", "/etc/bannerd/rules"]
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: client
+      args:
+        VERSION: "0.1.0"
+        GIT_SHA: "${GIT_SHA:-unknown}"
+    image: bannerd-client:dev
+    <<: *hardening
+    restart: "no"                            # 一次性批处理程序，跑完即退出，不重启
+    user: "65532:65532"
+    profiles: ["run"]                        # 默认 compose up 不起它；用 compose run 触发
+    depends_on:
+      server:
+        condition: service_healthy           # ← 真实健康检测驱动的启动依赖，不是"已启动"就放行
+    environment:
+      BANNERD_SERVER_URL: "http://server:8080"   # 服务名 DNS：唯一的跨容器路径
+    volumes:
+      # client 也是 scratch + 只读根：它只能读到 bind-mount 进来的内容，所以输入必须挂进来。
+      - ./testdata:/data:ro
+    networks: [backend]
+    command: ["--input", "/data/sample_input.json", "--format", "table"]
+    pids_limit: 64
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 64M
+          pids: 64    # 与上面的 pids_limit 同值，原因见 server 处注释
+
+networks:
+  backend:
+    driver: bridge
+    internal: true    # ← 无出网、无宿主发布：容器间访问收敛为唯一一条路径
