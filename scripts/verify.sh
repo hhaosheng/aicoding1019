@@ -89,7 +89,7 @@ if [ "$SKIP_BUILD" -eq 1 ]; then
 	step '1/7 跳过构建（--skip-build）'
 else
 	step '1/7 构建镜像（多阶段 → scratch；client 在 run profile 里，build 会自动按需构建）'
-	"${COMPOSE[@]}" build
+	"${COMPOSE[@]}" --profile run build
 fi
 
 # ---------------------------------------------------------------- 2 启动

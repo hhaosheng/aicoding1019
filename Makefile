@@ -38,7 +38,7 @@ else
 VERIFY_CMD := ./scripts/verify.sh
 endif
 
-.PHONY: help build test vet lint fmt run-server client health up up-expose down logs verify clean
+.PHONY: help build image test vet lint fmt run-server client health up up-expose down logs verify clean
 
 help: ## 显示本帮助（默认目标）
 	@echo "Banner 指纹识别系统 —— 可用目标："
@@ -55,6 +55,12 @@ build: ## 宿主机编译两个二进制到 bin/（bannerd + bannerctl）
 
 test: ## 运行全部单元测试（含黄金文件比对）
 	$(GO) test ./... -count=1
+
+image: ## 构建全部容器镜像（含 client —— 它在 run profile 里，必须显式带进来）
+	@# client 服务声明了 profiles: ["run"]，默认 profile 下 `compose build` 会跳过它，
+	@# 直到 `compose run client` 时才临时补建。补建本身没问题，但"什么时候构建"
+	@# 变得不可预测，所以这里显式把 client 也构建出来。
+	docker compose -f docker-compose.yaml --profile run build
 
 vet: ## 运行 go vet 静态检查
 	$(GO) vet ./...

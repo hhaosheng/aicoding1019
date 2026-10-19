@@ -5,7 +5,7 @@ Go 实现，client + server 一对二进制，`docker compose up` 一键启动�
 
 | 组件 | 二进制 | 职责 |
 |---|---|---|
-| server | `bannerd` | HTTP API（`POST /fingerprint`、`GET /health`）、识别引擎、规则集加载与热加载、优雅退出；另有 `healthcheck` 子命令供容器健康检测使用 |
+| server | `bannerd` | HTTP API（`POST /fingerprint`、`GET /health`）、识别引擎、启动期一次性加载规则集、优雅退出；另有 `healthcheck` 子命令供容器健康检测使用 |
 | client | `bannerctl` | 读本地 JSON / stdin → 分片请求 server → 输出 `table` / `json` / `csv`，带重试与退出码 |
 | 规则 | `rules/*.yaml` | **纯数据**：协议签名、产品/版本/OS 抽取、评分权重与上限 |
 
@@ -49,28 +49,33 @@ Go 实现，client + server 一对二进制，`docker compose up` 一键启动�
 ### 一键启动并端到端跑一次
 
 ```bash
-docker compose build            # 多阶段构建，零镜像拉取、零网络依赖
-docker compose up -d --wait     # 只起 server；--wait 等到 healthcheck 真的通过
-docker compose run --rm client  # 一次性批处理：读 testdata 样例 → 请求 server → 打印表格
+docker compose --profile run build   # 多阶段构建，零镜像拉取、零网络依赖
+docker compose up -d --wait          # 只起 server；--wait 等到 healthcheck 真的通过
+docker compose run --rm client       # 一次性批处理：读 testdata 样例 → 请求 server → 打印表格
 ```
 
-`client` 服务在 `profiles: ["run"]` 里，所以 `up` 不会启动它，跑批处理用 `docker compose run --rm client`。
+`client` 服务在 `profiles: ["run"]` 里，所以：`up` 不会启动它（跑批处理用 `docker compose run --rm client`）；`build` 也默认跳过它，想一次把两个镜像都建出来要显式带上 `--profile run`（`make image` 就是这么做的）。`docker compose run` 在镜像缺失时会自己补建，所以上面三条命令照抄即可。
 
 `client` 的默认输出（`-format table`）：
 
 ```text
-IP           PORT   PROTOCOL  PRODUCT       VERSION   OS_HINT   CONFIDENCE
-1.2.3.4      22     SSH       OpenSSH       8.9p1     Ubuntu    0.95
-1.2.3.5      80     HTTP      nginx         1.24.0              0.90
-1.2.3.6      443    HTTP      Apache        2.4.57              0.90
-1.2.3.7      3306   MySQL     MySQL         8.0.32              0.90
-1.2.3.8      6379   Redis                                        0.70
-1.2.3.9      21     FTP       ProFTPD       1.3.7               0.90
-1.2.3.10     8080   HTTP      Jetty         9.4.51              0.85
-...
----
-total=20 recognized=19 unknown=1 elapsed=6ms
+IP        PORT   PROTOCOL  PRODUCT        VERSION  OS_HINT  CONFIDENCE
+──        ────   ────────  ───────        ───────  ───────  ──────────
+1.2.3.4   22     SSH       OpenSSH        8.9p1    Ubuntu   0.95
+1.2.3.5   80     HTTP      nginx          1.24.0   -        0.90
+1.2.3.6   443    HTTP      Apache         2.4.57   -        0.90
+1.2.3.7   3306   MySQL     MySQL          8.0.32   -        0.90
+1.2.3.8   6379   Redis     Redis          -        -        0.70
+1.2.3.9   21     FTP       ProFTPD        1.3.7    -        0.90
+1.2.3.10  8080   HTTP      Jetty          9.4.51   -        0.85
+…（中间 12 行略）…
+1.2.3.22  21     FTP       Pure-FTPd      -        -        0.75
+1.2.3.23  12345  unknown   -              -        -        0.00
+
+共 20 条  |  已识别 19  |  unknown 1  |  耗时 3ms  |  服务端 http://server:8080
 ```
+
+两点值得注意：表格走 **stdout**，最后那行汇总走 **stderr** —— 所以 `bannerctl --format json | jq` 拿到的仍然是干净的 JSON，而人在终端上照样看得到汇总；空字段一律渲染成 `-`，不会让列错位。
 
 ### 看结果的其他方式
 
@@ -105,13 +110,13 @@ go run ./cmd/client -input testdata/sample_input.json -server http://127.0.0.1:8
 
 ### `POST /fingerprint` —— 批量识别
 
-**请求体接受两种形态**（样例输入是裸数组，必须兼容；信封形态便于带批量元信息）：
+**请求体接受两种形态**（样例输入是裸数组，必须兼容；`{"items":[...]}` 对象包装便于带批量元信息）：
 
 ```jsonc
 // 形态 A —— 裸数组
 [ {"ip": "1.2.3.4", "port": 22, "banner": "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"} ]
 
-// 形态 B —— 信封
+// 形态 B —— 对象包装（只存在于**请求**侧，响应侧没有对称形态）
 { "items": [ {"ip": "1.2.3.4", "port": 22, "banner": "..."} ] }
 ```
 
@@ -124,27 +129,26 @@ go run ./cmd/client -input testdata/sample_input.json -server http://127.0.0.1:8
 | `banner` | string | 二选一 | 文本形态；`\xNN` / `\r` / `\n` / `\t` / `\\` / `\0` 会被尽力还原为真实字节后再匹配 |
 | `banner_b64` | string | 二选一 | base64 原始字节，用于精确二进制输入；与 `banner` 同时给出时**以 `banner_b64` 为准** |
 
-查询参数：
+查询参数（**只有一个**）：
 
 | 参数 | 说明 |
 |---|---|
-| `?envelope=1` | 响应改为信封形态（`results` + `summary`），默认是裸数组 |
-| `?debug=1` | 在结果项上附加原始字节诊断字段，供人工研判；这些字段不属于稳定契约 |
+| `?debug=1` | 在结果项上附加诊断负载（命中规则、候选列表、banner 长度与转义标记等），供人工研判；这些字段不属于稳定契约。服务端 `-debug` / `BANNERD_DEBUG` 可把默认值打开 |
 
-**响应默认是裸数组**（严格对齐任务示例）；`?envelope=1` 时返回 `results` + `summary`：
+**响应体永远是裸数组**（严格对齐任务示例）；**全部元数据走响应头**：
+
+| 响应头 | 说明 |
+|---|---|
+| `X-Request-Id` | 每个响应都有；与错误体里的 `request_id` 一致 |
+| `X-Bannerd-Rules-Sha256` | 本次识别所用规则集的内容哈希 |
+| `X-Bannerd-Items` | 结果条数（与请求条目 1:1 且顺序一致） |
+| `X-Bannerd-Identified` | 识别出的条数 |
+| `X-Bannerd-Unknown` | 降级为 `unknown` 的条数 |
+| `X-Bannerd-Duration-Ms` | 本次批量识别的耗时（毫秒） |
+| `X-Bannerd-Degraded` | **仅在自检探针有失败时出现**，值为失败条数；此时 `/fingerprint` **仍返回 200 与结果** |
 
 ```jsonc
-// 默认
 [ {"ip":"1.2.3.4","port":22,"protocol":"SSH","product":"OpenSSH","version":"8.9p1","os_hint":"Ubuntu","confidence":0.95} ]
-
-// ?envelope=1
-{
-  "results": [ /* 同上 */ ],
-  "summary": {
-    "total": 20, "recognized": 19, "unknown": 1, "elapsed_ms": 4,
-    "ruleset": {"pack_version": "1.0.0", "sha256": "ab12…", "count": 42}
-  }
-}
 ```
 
 响应 item 字段（**严格这 7 个**，与请求 item **1:1 且顺序一致**，任何单条失败都不丢条目）：
@@ -167,32 +171,41 @@ go run ./cmd/client -input testdata/sample_input.json -server http://127.0.0.1:8
   "version": "0.1.0",
   "git_sha": "9f2c1ab",
   "uptime_s": 42,
-  "ruleset": {
-    "pack_version": "1.0.0",
-    "sha256": "ab12cd34…",              // 规则包内容哈希：能证明当前生效的是哪一版规则
-    "count": 42,
-    "source": "embedded+external",      // embedded | external | embedded+external
-    "loaded_at": "2026-10-19T07:00:00Z"
+  "rules": {
+    "source": "embedded",               // embedded | external | embedded+external
+    "schema_version": 1,                // 规则文件 schema 版本（不是"包版本"，也不是规则条数）
+    "packs": 9,                         // 规则包文件数
+    "count": 47,                        // 规则条数
+    "sha256": "c4f9122d…",              // 规则集内容哈希：能证明当前生效的是哪一版规则
+    "loaded_at": "2026-10-19T07:38:21Z"
   },
-  "checks": {
-    "engine_selftest": {"ok": true, "cases": 6, "failed": []},
-    "ruleset_loaded":  {"ok": true}
+  "probes": {
+    "total": 6,
+    "passed": 6,
+    "failures": []                      // 每项为 {name, want, got}
   }
 }
 ```
 
-每次调用都实时跑 6 条内置探针 banner（覆盖 SSH / HTTP / MySQL / Redis / FTP / TLS）过一遍引擎，断言 `protocol` / `product` / `version`；任一条不符即 `status: "degraded"` + **HTTP 503**，并在 `failed` 里给出 `{probe, want, got}`。
+每次调用都实时跑 6 条内置探针 banner（覆盖 SSH / HTTP / MySQL / Redis / FTP）过一遍引擎，断言 `protocol` / `product` / `version`；任一条不符即 `status: "degraded"` + **HTTP 503**，并在 `probes.failures` 里给出 `{name, want, got}`（`got` 形如 `SSH/OpenSSH/8.9p1/Ubuntu/0.95`，`want` 形如 `SSH/OpenSSH/8.9p1/Ubuntu/>=0.95`）。
 
 ### 状态码
 
 | 状态 | 场景 | 响应体 |
 |---|---|---|
-| 200 | 正常（含**全部条目都 unknown**） | 结果数组 / 信封 |
-| 400 | 请求体不是合法 JSON，或 `items` 不是数组 | `{"error":{"code":"invalid_request","message":"…"}}` |
-| 413 | 超过 `max_body_bytes`（8 MiB）或 `max_items`（10000） | `{"error":{"code":"payload_too_large","message":"…"}}` |
-| 415 | Content-Type 非 `application/json` | `{"error":{"code":"unsupported_media_type","message":"…"}}` |
-| 500 | 未预期 panic（被 recover 兜住） | `{"error":{"code":"internal","request_id":"…"}}` |
-| 503 | `/health` 自检失败（degraded） | 见上 |
+| 200 | 识别正常（含**全部条目都 unknown**）；`/health` 自检通过 | 结果数组 / 健康对象 |
+| 400 | 请求体为空、不是合法 JSON，或不是「数组 / `{"items":[...]}` 对象」 | `{"error":{"code":"bad_json","message":"…","request_id":"…"}}` |
+| 404 | 路径不存在 | `{"error":{"code":"not_found","message":"…","request_id":"…"}}` |
+| 405 | 路径存在但方法不对（响应带 `Allow` 头） | `{"error":{"code":"method_not_allowed","message":"…","request_id":"…"}}` |
+| 413 | 请求体超过 `max_body_bytes`（默认 16 MiB） | `{"error":{"code":"body_too_large","message":"…","request_id":"…"}}` |
+| 500 | 未预期 panic（被中间件 recover 兜住） | `{"error":{"code":"internal_error","message":"…","request_id":"…"}}` |
+| 503 | `/health` 自检失败（degraded）——**这一条只属于 `/health`** | 见上 |
+
+错误体固定三字段 `{code, message, request_id}`，三者**全部必填**，`request_id` 与响应头 `X-Request-Id` 一致；`code` 的全部取值只有 `internal_error` / `method_not_allowed` / `not_found` / `body_too_large` / `bad_request` / `bad_json` 六个。
+
+**没有 415。** 服务端刻意不校验 `Content-Type`：`curl -X POST -d @file` 默认发 `application/x-www-form-urlencoded`，强校验会让文档里"复制粘贴就能跑"的示例直接失败 —— 宁可在解析 JSON 时给出清晰的 `bad_json`。这是刻意的取舍，不是漏实现。
+
+**`/fingerprint` 永不返回 503。** 挂载外部规则目录是本项目的卖点，而外部规则覆盖不全时内置探针必然失败；若因此让 `/fingerprint` 硬失败，"换个规则文件就能改识别能力"就变成"一换就报错"。健康与否是 `/health` 的职责，`/fingerprint` 最多加一个 `X-Bannerd-Degraded` 响应头。
 
 **关键语义**：单条 item 数据非法（缺字段、`port` 越界、banner 为空）**不是错误**——该条降级为 `protocol:"unknown"`、`confidence:0`，整批仍然 200。只有"请求体本身"不合法或超限才 4xx。
 
@@ -215,8 +228,8 @@ go run ./cmd/client -input testdata/sample_input.json -server http://127.0.0.1:8
 | 码 | 含义 |
 |---|---|
 | 0 | 成功 |
-| 1 | 用法错误 / 输入文件错误 |
-| 2 | 传输或服务端错误 |
+| 1 | 用法错误（参数拼错、取值非法） |
+| 2 | 输入文件错误、传输失败或服务端错误 |
 | 3 | 设置了 `-strict` 且结果中存在 `unknown` |
 
 ### server CLI
@@ -336,12 +349,31 @@ rules:
 1. **基线**：`go:embed rules/*.yaml`，规则随二进制走，`scratch` 空镜像自带完整规则包，镜像自包含、可复现。
 2. **覆盖**：`--rules-dir /etc/bannerd/rules`（可用 `-v ./rules:/etc/bannerd/rules:ro` 挂载）。**同名文件整文件替换**内置同名 pack，目录里新增的 pack 直接追加。**不做"逐规则合并"** —— 整文件替换语义简单、可预测、易解释，避免"半覆盖"造成隐性行为差异。
 3. **校验**：加载期用 `regexp.Compile` 编译每条正则，校验 `id` 唯一、`protocol` 非空、`score` 各项 ∈ [0,1] 且 `ceiling_no_version ≤ ceiling`；任一失败 → **启动即失败并打印出错的 `rule_id` 与原因**（fail fast），绝不静默跳过坏规则 —— 否则"规则写错了"会表现成"识别率莫名下降"，极难排查。
-4. **热加载**：给定 `--rules-dir` 时默认开启，每 5s 比对文件列表 + mtime + size；变化则全量重载，编译成功后**原子替换**规则集；编译失败则**保留旧规则集**并在日志与 `/health` 里报 `degraded`，服务不中断。
-5. **可观测**：`/health` 返回规则包 `sha256` 与 `count`，任何时刻都能确认"生效的是哪一版规则"。
+4. **加载时机**：规则集在**进程启动时一次性加载**，加载失败即拒绝启动（见上一条）。**没有运行期热加载** —— 改完 YAML 需要重启进程才会生效（`docker compose up -d --force-recreate server`，或本地重新 `go run`）。
+5. **可观测**：`/health` 返回规则集 `source` / `schema_version` / `packs` / `count` / `sha256`，任何时刻都能确认"生效的是哪一版规则"。
 
-### 可选的规则热加载演示
+### 可选：挂载外部规则目录（改完需重启）
 
-默认 compose **不挂载** `rules/`（规则已 embed，保持镜像自包含）。想演示"改规则不用重编译镜像"，自行创建一个 override 片段（例如 `docker-compose.rules.yaml`）：
+默认 compose **不挂载** `rules/`（规则已 embed，保持镜像自包含）。想演示"改规则不用重编译"，直接用仓库里现成的示例目录 `examples/rules-override/` —— 它只新增一个 pack，把样例里唯一那条 `unknown`（`1.2.3.23:12345` 的 `QUIT`）认出来：
+
+```bash
+docker network create bannerd-demo-net
+docker run --rm -d --name bannerd-demo --network bannerd-demo-net \
+  -v "$PWD/examples/rules-override:/rules:ro" \
+  bannerd-server:dev --rules-dir /rules
+docker run --rm --network bannerd-demo-net -v "$PWD/testdata:/data:ro" \
+  bannerd-client:dev --input /data/sample_input.json \
+  --server http://bannerd-demo:8080 --format csv
+```
+
+`scripts/verify.ps1` / `scripts/verify.sh` 的第 6 步会自动跑一遍，并断言四件事（缺一不可）：
+
+- 外部规则目录下的 server 自检仍然 **6/6** —— 新增 pack 没有破坏内置能力；
+- `source` 变为 `/rules`、`packs` 由 9 变 **10** —— 是**新增**一个 pack，不是顶掉内置；
+- 规则 `sha256` **随之改变** —— 换了规则，可复现凭据就必须变；
+- 除被新规则认出来的那一条外，其余 19 行**一字未改** —— 只增不改，新增规则不该扰动任何已有结论。
+
+想在 compose 里做同样的事，加一个 override 片段即可：
 
 ```yaml
 # 需自行创建；用法: docker compose -f docker-compose.yaml -f docker-compose.rules.yaml up -d
@@ -352,7 +384,7 @@ services:
       - ./rules:/etc/bannerd/rules:ro
 ```
 
-改完 YAML 等最多 5s，`/health` 里的 `ruleset.sha256` 就会变；把一条正则改坏，`/health` 直接转 `degraded` + 503（旧规则集仍然生效，服务不中断）。
+改完 YAML 后重启 server，`/health` 里的 `rules.sha256` / `rules.count` / `rules.packs` 就会随之变化；把一条正则改坏，进程会**在启动期直接失败并打印出错的 `rule_id`**（不会带病启动，也不会静默跳过坏规则）。
 
 ### DSL 的语法边界
 
@@ -370,7 +402,7 @@ services:
 
 ### 2. 健康检测：检查的是识别能力，不是进程存活
 
-**用了什么**：`/health` 每次真的跑 6 条探针 banner 过引擎并断言结果，失败返回 503 与 `{probe, want, got}`；compose 的 healthcheck 执行 `bannerd healthcheck --url http://127.0.0.1:8080/health`；client 用 `depends_on: {server: {condition: service_healthy}}`。
+**用了什么**：`/health` 每次真的跑 6 条探针 banner 过引擎并断言结果，失败返回 503 与 `{name, want, got}`；compose 的 healthcheck 执行 `bannerd healthcheck --url http://127.0.0.1:8080/health`；client 用 `depends_on: {server: {condition: service_healthy}}`。
 
 **为什么**：三层都刻意选"更严格"的那个。探针断言的是**引擎还能不能识别**，所以"规则被改坏"这件事会被 healthcheck 直接抓到，而不是等业务请求出错。运行镜像是 `scratch`，里面没有 `curl`/`wget`，所以健康检测只能由程序自己发起——这反而正好，因为 `bannerd healthcheck` 打的是**应用语义端点**而不是 TCP 探活。`service_healthy` 让 client 等的是"健康"而不是"已启动"，避免抢跑拿到 `connection refused`，`docker compose up -d --wait` 也因此真的在等"能识别"。
 
@@ -378,7 +410,7 @@ services:
 
 **用了什么**：多阶段构建 `src → test → build → server / client`。`src` 层先 COPY 依赖清单与 `vendor/`、再 COPY 源码（改代码不失效依赖层）；`test` 层在构建期跑 `go vet ./... && go test ./...`；`build` 层 `CGO_ENABLED=0` + `-trimpath -buildvcs=false` + `-ldflags "-s -w -X …"` 注入版本号与 git sha；运行时 `scratch`，非 root `65532:65532`。构建镜像 `golang:1.22-alpine3.20`，唯一依赖 `gopkg.in/yaml.v3` 已 vendor 进仓库，`GOTOOLCHAIN=local`、`GOFLAGS=-mod=vendor`。
 
-**为什么这样打包**：`CGO_ENABLED=0` + `netgo,osusergo` 之后二进制完全静态，不依赖 glibc，`scratch` 直接可跑；`scratch` 里没有 shell、没有包管理器、没有 libc，即使应用被攻破也没有可用工具链打点，镜像约 6 MB。**离线是硬要求**：本机 Docker Hub 直连不可达、`proxy.golang.org` 超时，所以整条构建链不能有任何"拉取"动作——vendor 化消掉 Go 侧下载，构建镜像用本地已有的 tag，运行时用 `scratch`（保留名，无需拉取），结论是 `docker compose build` **完全不需要网络**。代价是 `scratch` 没有 tzdata 也没有 CA 根证书：日志统一用 UTC / RFC3339；本服务端不发起任何出网 TLS 连接（client→server 走 compose 内网明文 HTTP），因此不需要 CA；将来若要出网 HTTPS，补一行 `COPY --from=build /etc/ssl/certs/ca-certificates.crt` 即可。
+**为什么这样打包**：`CGO_ENABLED=0` + `netgo,osusergo` 之后二进制完全静态，不依赖 glibc，`scratch` 直接可跑；`scratch` 里没有 shell、没有包管理器、没有 libc，即使应用被攻破也没有可用工具链打点。实测镜像大小：`bannerd-server:dev` **9 MB**、`bannerd-client:dev` **7.7 MB**（`scratch` + 静态二进制 + embed 规则）。**离线是硬要求**：本机 Docker Hub 直连不可达、`proxy.golang.org` 超时，所以整条构建链不能有任何"拉取"动作——vendor 化消掉 Go 侧下载，构建镜像用本地已有的 tag，运行时用 `scratch`（保留名，无需拉取），结论是 `docker compose build` **完全不需要网络**。代价是 `scratch` 没有 tzdata 也没有 CA 根证书：日志统一用 UTC / RFC3339；本服务端不发起任何出网 TLS 连接（client→server 走 compose 内网明文 HTTP），因此不需要 CA；将来若要出网 HTTPS，补一行 `COPY --from=build /etc/ssl/certs/ca-certificates.crt` 即可。
 
 ### 4. 权限收紧
 
@@ -413,7 +445,9 @@ go test ./... -count=1  # 不吃测试缓存
 | 目标 | 作用 |
 |---|---|
 | `make test` | `go test ./...` |
+| `make lint` | `gofmt -l ./cmd ./internal` 格式校验 + `go vet ./...`（刻意不引入任何需要联网下载的第三方 linter） |
 | `make build` | 本机构建 `bannerd` / `bannerctl` |
+| `make image` | `docker compose --profile run build`（client 在 `run` profile 里，不显式带 `--profile run` 会被跳过） |
 | `make up` | `docker compose up -d --wait`（server 起来并 healthy） |
 | `make up-expose` | 叠加 `docker-compose.expose.yaml` 启动，把 `127.0.0.1:8080` 放出来 |
 | `make verify` | 一键端到端验收（等价于 `scripts/verify.*`） |
@@ -434,13 +468,13 @@ go test ./... -count=1  # 不吃测试缓存
 make verify               # 等价入口
 ```
 
-验收脚本做的事：`go vet` + `go test` → `docker compose build` → `up -d --wait`（等 healthy）→ `compose run --rm client -format json` → 与 `testdata/sample_expected.json` 逐字段比对 → 检查硬化项（`ReadonlyRootfs` / `CapDrop=ALL` / `SecurityOpt` / `PidsLimit` / `User=65532`）、收敛项（server 无端口发布、网络 `internal: true`）、依赖项（client 为 `service_healthy`）→ `down -v`。
+验收脚本做的事：`docker compose --profile run build` → `up -d --wait`（等 healthcheck 真正通过，不是 sleep）→ 在 server 容器内跑 `bannerd healthcheck`（`scratch` 里没有 curl，健康只能自证）→ 经 client 容器发起批量识别 → 断言 20 条结果的条数 / 顺序 / 逐字段（7 行验收样例 + 8 个额外能力点）→ 再起一台**只换了规则目录**的 server，验证"换规则不换代码" → `down`。
 
-手工逐步复现：
+注意：**验收脚本不直接跑 `go test`。** 单元测试在镜像构建阶段（`Dockerfile` 的 `test` 阶段）和 `make test` 里跑；验收脚本只回答一个问题——把镜像真的跑起来之后，任务要求的那几条还能不能对上。
 
 ```bash
-# 1) 构建（无需联网）
-docker compose build
+# 1) 构建（无需联网；client 在 run profile 里，要显式带 --profile run）
+docker compose -f docker-compose.yaml --profile run build
 
 # 2) 启动并等健康检查真正通过
 docker compose up -d --wait
@@ -448,19 +482,19 @@ docker compose ps                       # server 的 health 列应为 healthy
 
 # 3) 端到端跑一遍样例
 docker compose run --rm client                      # 表格
-docker compose run --rm client -format json | head  # 裸数组 JSON
+docker compose run --rm client --format csv | head  # 一行一条，便于对比
 
-# 4) 看健康自检内容（规则包 sha256 / count / 探针结果）
+# 4) 看健康自检内容（规则集 source / schema_version / packs / count / sha256 与探针结果）
 docker compose -f docker-compose.yaml -f docker-compose.expose.yaml up -d
 curl -sS http://127.0.0.1:8080/health
 
-# 5) 裸数组入参与信封入参都通
-curl -sS -X POST http://127.0.0.1:8080/fingerprint \
+# 5) 裸数组与 {"items":[...]} 对象入参都通；服务端刻意不校验 Content-Type
+curl -sS -D- -X POST http://127.0.0.1:8080/fingerprint \
   -H 'Content-Type: application/json' \
   --data-binary @testdata/sample_input.json
-curl -sS -X POST 'http://127.0.0.1:8080/fingerprint?envelope=1' \
-  -H 'Content-Type: application/json' \
+curl -sS -X POST http://127.0.0.1:8080/fingerprint \
   --data-binary '{"items":[{"ip":"1.2.3.4","port":22,"banner":"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"}]}'
+# 逐条诊断信息用 ?debug=1；命中数 / 耗时 / 规则哈希看响应头（上面 -D- 打印出来的那些）
 
 # 6) 收摊
 docker compose down -v
@@ -472,7 +506,7 @@ docker compose down -v
 
 - **TLS 不臆造版本。** banner 是裸 TLS 记录（`\x16\x03\x01…`）时，只报 `protocol: "TLS"`，`version` 留空，置信度 0.60。原因：记录头里的 `03 01` 是 **record version**，在 ClientHello 上几乎恒为兼容用的 legacy 值，**不代表协商出的版本**。宁可给低分，也不编一个 `1.0` 出来；原始字节留在 `?debug=1` 的附加字段里供人工研判。
 - **`unknown` 不是错误。** 设计立场：认不出来是正常业务结果，不是异常。所以空 banner、纯 NUL、乱码、超长、`QUIT\r\n` 都返回 `protocol: "unknown"` + `confidence: 0`，整体 200，绝不因为认不出就 500 或丢条目。
-- **默认响应是裸数组。** 严格对齐任务示例；元信息走 `?envelope=1`。不拿兼容性换信息量。
+- **响应永远是裸数组，元数据全走响应头。** 严格对齐任务示例；命中数 / 耗时 / 规则 sha256 都在 `X-Bannerd-*` 响应头里，既不改调用方的解析代码，也不丢信息量。
 - **外部规则整文件替换，不逐规则合并。** 同名 pack 整文件覆盖内置，语义可预测、易于解释；避免"半覆盖"造成的隐性行为差异。
 - **RE2 语法子集。** 不支持环视与反向引用，换来线性时间与无 ReDoS。规则写错在加载期就带 `rule_id` 失败。
 - **规则默认 embed 而非挂载。** 保持镜像自包含、可复现；挂载只作为"改规则不重编译"的演示手段（见上文 override 片段）。
@@ -490,14 +524,15 @@ docker compose down -v
 ├── README.md                   # 本文
 ├── api/openapi.yaml            # 接口契约（OpenAPI 3.0.3）
 ├── go.mod  go.sum  vendor/     # go 1.22；唯一依赖 yaml.v3 已 vendor
-├── Makefile                    # build / test / up / up-expose / verify / down
+├── Makefile                    # image / build / test / vet / lint / up / verify / down 等 16 个目标
 ├── Dockerfile                  # src → test → build → server / client (scratch)
 ├── docker-compose.yaml         # 默认：锁死形态（无端口发布、internal 网络）
 ├── docker-compose.expose.yaml  # 可选：仅本地人工验证
 ├── cmd/      server/  client/
-├── internal/ api/  engine/  rules/  banner/  health/  config/  version/
+├── internal/ api/  engine/  rules/  banner/  config/  version/
 ├── rules/    _pack.yaml ssh.yaml http.yaml ftp.yaml mysql.yaml
 │             redis.yaml tls.yaml mail.yaml generic.yaml
-├── testdata/ sample_input.json  sample_expected.json  edge_cases.json  probes.json
+├── testdata/ sample_input.json  sample_input_loose.json  expected_20.json
+├── examples/ rules-override/   # 「换规则不换代码」的演示规则目录
 └── scripts/  verify.ps1  verify.sh
 ```
