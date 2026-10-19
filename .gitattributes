@@ -1,0 +1,26 @@
+# .gitattributes —— 统一换行，钉死"同一份 commit 在任何平台检出都得到同一份字节"。
+#
+# 这不是代码风格问题。rules/*.yaml 会被 go:embed 编进二进制，而规则集的 sha256 是
+# 对**文件字节**算的（/health 与 X-Bannerd-Rules-Sha256 都暴露它）。若 Windows 检出
+# 成 CRLF、Linux 检出成 LF，同一个 commit 会算出两个不同的规则指纹 —— "可复现"就
+# 无从谈起，而本项目恰恰把"规则可换、指纹可查"当作卖点。容器是 Linux、开发机是
+# Windows，所以必须在这里钉死，而不是靠每台机器的 core.autocrlf。
+#
+# 同理适用于 Dockerfile / Makefile / scripts/verify.sh：CRLF 的 shebang 在 Linux 上
+# 会以 "bad interpreter" 直接失败。
+
+* text=auto eol=lf
+
+# —— 二进制资源不做任何换行转换 ——
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.webp binary
+*.zip  binary
+*.gz   binary
+*.tar  binary
+*.pdf  binary
+*.woff binary
+*.woff2 binary
