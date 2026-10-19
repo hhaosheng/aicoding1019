@@ -1,0 +1,714 @@
+openapi: 3.0.3
+
+info:
+  title: Banner 指纹识别服务 API
+  version: 1.0.0
+  description: |
+    接收批量网络扫描原始记录（`ip` / `port` / `banner`），识别 **协议 / 产品 / 版本 / OS 提示** 与 **置信度**。
+
+    设计要点（与本契约直接相关）：
+
+    * **入参双形态**：裸 JSON 数组（与任务样例一致，主兼容路径）与 `{"items":[...]}` 信封都接受。
+    * **响应默认裸数组**（严格对齐任务示例）；`?envelope=1` 切换为带 `summary` 的信封。
+    * **结果与请求条目严格 1:1 且顺序一致**：任何单条失败都不允许丢条目。
+    * **单条数据非法不是错误**：降级为 `protocol:"unknown"`、`confidence:0`，整批仍返回 200；
+      只有**请求体本身**不合法或超限才返回 4xx。
+    * **`GET /health` 是真实自检**：每次调用实时跑 6 条内置探针 banner 过一遍识别引擎并断言结果，
+      任一条不符即 `status:"degraded"` + HTTP 503，并在 `checks.engine_selftest.failed` 给出 `{probe, want, got}`。
+    * 本服务**没有认证、没有传输层加密、没有持久化**：容器间通过 compose 内网明文 HTTP 通信，
+      对外暴露时应由调用方自行前置反向代理与访问控制。
+servers:
+  - url: http://server:8080
+    description: |
+      compose 内网服务名地址（默认形态）。`server` 刻意不发布任何宿主端口，
+      唯一受支持的访问路径就是同一条 `backend` 网络内的服务名 DNS。
+  - url: http://127.0.0.1:8080
+    description: |
+      仅用于本机人工验证：需显式叠加 override 文件
+      `docker compose -f docker-compose.yaml -f docker-compose.expose.yaml up -d`，
+      该 override 只把端口绑到回环地址 `127.0.0.1`，不会暴露到局域网。
+
+tags:
+  - name: fingerprint
+    description: 批量 banner 识别
+  - name: health
+    description: 健康与规则集自检
+
+paths:
+  /fingerprint:
+    post:
+      tags: [fingerprint]
+      summary: 批量识别 banner
+      description: |
+        提交一批扫描原始记录，逐条返回识别结果。结果与请求条目 **1:1、顺序一致**。
+
+        请求体两种形态均可：裸数组，或 `{"items":[...]}` 信封。
+        响应默认为裸数组；`?envelope=1` 时返回 `results` + `summary`。
+
+        单条 item 数据非法（缺字段、`port` 越界、banner 为空）不会导致整批失败：
+        该条返回 `protocol:"unknown"`、`confidence:0`，其余条目照常识别，HTTP 状态仍为 200。
+      operationId: fingerprintBatch
+      parameters:
+        - name: envelope
+          in: query
+          required: false
+          description: |
+            取值为 `1` 时把响应切换为信封形态（`results` + `summary`）。
+            省略或取其他值时返回裸数组（默认，严格对齐任务示例形态）。
+          schema:
+            type: string
+            enum: ["1"]
+        - name: debug
+          in: query
+          required: false
+          description: |
+            取值为 `1` 时在每个结果项上附加原始字节诊断字段（例如解码后的十六进制视图），
+            供人工研判。这些附加字段**不属于稳定契约**，字段名与形态可能变化。
+          schema:
+            type: string
+            enum: ["1"]
+      requestBody:
+        required: true
+        description: |
+          裸数组或 `{"items":[...]}` 信封。`Content-Type` 必须是 `application/json`，
+          否则返回 415。请求体超过 `max_body_bytes`（8 MiB）或条目数超过 `max_items`（10000）
+          返回 413。空数组是合法输入，返回空结果数组。
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/FingerprintRequestArray'
+                - $ref: '#/components/schemas/FingerprintRequestEnvelope'
+            examples:
+              bareArray7:
+                summary: 裸数组形态 —— 验收样例的前 7 条
+                description: |
+                  `banner` 字段是文本形态，`\xNN` / `\r` / `\n` / `\t` / `\\` / `\0` 都会被尽力还原为真实字节
+                  后再参与匹配。MySQL 那条给出的就是「字面量转义文本」形态（banner 里真的躺着 `\`、`x`、`0`、`0`）。
+                value:
+                  - ip: "1.2.3.4"
+                    port: 22
+                    banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"
+                  - ip: "1.2.3.5"
+                    port: 80
+                    banner: "HTTP/1.1 200 OK\r\nServer: nginx/1.24.0\r\nContent-Type: text/html"
+                  - ip: "1.2.3.6"
+                    port: 443
+                    banner: "Server: Apache/2.4.57"
+                  - ip: "1.2.3.7"
+                    port: 3306
+                    banner: 'J\x00\x00\x00\n8.0.32\x00'
+                  - ip: "1.2.3.8"
+                    port: 6379
+                    banner: "-ERR wrong number of arguments for 'get' command"
+                  - ip: "1.2.3.9"
+                    port: 21
+                    banner: "220 ProFTPD 1.3.7 Server (ProFTPD)"
+                  - ip: "1.2.3.10"
+                    port: 8080
+                    banner: "HTTP/1.1 404 Not Found\r\nServer: Jetty/9.4.51"
+              envelope1:
+                summary: 信封形态 —— 单条请求
+                value:
+                  items:
+                    - ip: "1.2.3.4"
+                      port: 22
+                      banner: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"
+              mysqlBinaryB64:
+                summary: 精确二进制输入 —— 用 banner_b64 传 MySQL 握手包的原始字节
+                description: |
+                  `SgAAAAo4LjAuMzIA` 就是 `J\x00\x00\x00\n8.0.32\x00` 的 12 个真实字节
+                  （`4A 00 00 00 0A 38 2E 30 2E 33 32 00`）。`banner` 与 `banner_b64` 同时给出时，
+                  服务端以 `banner_b64` 为准。
+                value:
+                  items:
+                    - ip: "1.2.3.7"
+                      port: 3306
+                      banner_b64: "SgAAAAo4LjAuMzIA"
+              tlsRecord:
+                summary: 裸 TLS 记录头 —— 只报协议，不臆造版本
+                description: |
+                  `FgMBAKUBAACh` 是 `\x16\x03\x01\x00\xa5\x01\x00\x00\xa1`。
+                  记录头里的 `03 01` 是 record version，在 ClientHello 上几乎恒为兼容用的 legacy 值，
+                  不代表协商出的版本，因此响应中 `version` 为空、`confidence` 为 0.60。
+                value:
+                  items:
+                    - ip: "1.2.3.16"
+                      port: 443
+                      banner_b64: "FgMBAKUBAACh"
+      responses:
+        '200':
+          description: |
+            识别完成。默认返回裸数组；`?envelope=1` 时返回 `results` + `summary`。
+            即使全部条目都识别为 `unknown`（全部条目各自 `confidence: 0`），也仍是 200。
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/FingerprintResponseArray'
+                  - $ref: '#/components/schemas/FingerprintResponseEnvelope'
+              examples:
+                bareArray7:
+                  summary: 默认裸数组响应 —— 对上例前 7 条的期望结果
+                  value:
+                    - ip: "1.2.3.4"
+                      port: 22
+                      protocol: "SSH"
+                      product: "OpenSSH"
+                      version: "8.9p1"
+                      os_hint: "Ubuntu"
+                      confidence: 0.95
+                    - ip: "1.2.3.5"
+                      port: 80
+                      protocol: "HTTP"
+                      product: "nginx"
+                      version: "1.24.0"
+                      os_hint: ""
+                      confidence: 0.9
+                    - ip: "1.2.3.6"
+                      port: 443
+                      protocol: "HTTP"
+                      product: "Apache"
+                      version: "2.4.57"
+                      os_hint: ""
+                      confidence: 0.9
+                    - ip: "1.2.3.7"
+                      port: 3306
+                      protocol: "MySQL"
+                      product: "MySQL"
+                      version: "8.0.32"
+                      os_hint: ""
+                      confidence: 0.9
+                    - ip: "1.2.3.8"
+                      port: 6379
+                      protocol: "Redis"
+                      product: "Redis"
+                      version: ""
+                      os_hint: ""
+                      confidence: 0.7
+                    - ip: "1.2.3.9"
+                      port: 21
+                      protocol: "FTP"
+                      product: "ProFTPD"
+                      version: "1.3.7"
+                      os_hint: ""
+                      confidence: 0.9
+                    - ip: "1.2.3.10"
+                      port: 8080
+                      protocol: "HTTP"
+                      product: "Jetty"
+                      version: "9.4.51"
+                      os_hint: ""
+                      confidence: 0.85
+                envelope1:
+                  summary: '?envelope=1 信封响应（示例对应上面两条：SSH 与 MySQL）'
+                  value:
+                    results:
+                      - ip: "1.2.3.4"
+                        port: 22
+                        protocol: "SSH"
+                        product: "OpenSSH"
+                        version: "8.9p1"
+                        os_hint: "Ubuntu"
+                        confidence: 0.95
+                      - ip: "1.2.3.7"
+                        port: 3306
+                        protocol: "MySQL"
+                        product: "MySQL"
+                        version: "8.0.32"
+                        os_hint: ""
+                        confidence: 0.9
+                    summary:
+                      total: 2
+                      recognized: 2
+                      unknown: 0
+                      elapsed_ms: 1
+                      ruleset:
+                        pack_version: "1.0.0"
+                        sha256: "ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890"
+                        count: 42
+                unknownDegrade:
+                  summary: 认不出来时优雅降级（整体仍是 200）
+                  value:
+                    - ip: "1.2.3.20"
+                      port: 12345
+                      protocol: "unknown"
+                      product: ""
+                      version: ""
+                      os_hint: ""
+                      confidence: 0
+        '400':
+          description: |
+            请求体不是合法 JSON，或 `items` 不是数组。注意：**单条 item 字段非法不属于此列**，
+            那种情况按 `protocol:"unknown"` 降级并仍返回 200。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalidJson:
+                  summary: 请求体不是合法 JSON
+                  value:
+                    error:
+                      code: "invalid_request"
+                      message: "request body is not valid JSON: unexpected end of JSON input"
+        '413':
+          description: |
+            请求体超过 `max_body_bytes`（默认 8 MiB），或条目数超过 `max_items`（默认 10000）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                tooManyItems:
+                  summary: 条目数超过 max_items
+                  value:
+                    error:
+                      code: "payload_too_large"
+                      message: "too many items: 10001 > max_items 10000"
+        '415':
+          description: '`Content-Type` 不是 `application/json`。'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                wrongContentType:
+                  summary: Content-Type 不受支持
+                  value:
+                    error:
+                      code: "unsupported_media_type"
+                      message: "unsupported content type \"text/plain\", want application/json"
+        '500':
+          description: |
+            未预期 panic（被中间件的 `recover()` 兜住）。识别引擎对**单条 item** 另有 `recover()`，
+            单条数据触发的 panic 只会让该条降级为 `unknown`，不会走到这里。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                internal:
+                  summary: 内部错误
+                  value:
+                    error:
+                      code: "internal"
+                      message: "internal error"
+                      request_id: "6f1c2a0e3b7d4a55"
+        '503':
+          description: |
+            服务处于 `degraded` 状态（引擎自检未通过）。响应体与 `GET /health` 的 `degraded` 响应一致，
+            直接给出 `{probe, want, got}` 明细，便于一眼看出是哪条探针失败。
+            规则热加载失败时会保留旧的可用规则集，因此该状态通常只在启动期规则自检失败后出现。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                degraded:
+                  $ref: '#/components/examples/DegradedHealth'
+
+  /health:
+    get:
+      tags: [health]
+      summary: 健康与规则集自检
+      description: |
+        **真实自检，不是"进程活着"**：每次调用都实时把 6 条内置探针 banner（覆盖 SSH / HTTP / MySQL /
+        Redis / FTP / TLS）跑一遍识别引擎，并断言 `protocol` / `product` / `version`。
+
+        * 全部通过 → `status:"ok"` + HTTP 200，并回报当前生效规则包的 `pack_version` / `sha256` / `count` / `source`。
+        * 任一条不符 → `status:"degraded"` + **HTTP 503**，在 `checks.engine_selftest.failed` 里给出 `{probe, want, got}`。
+
+        `docker compose` 的 healthcheck 正是打这个端点（经 `bannerd healthcheck --url http://127.0.0.1:8080/health`，
+        因为 `scratch` 运行时镜像里没有 `curl` / `wget`），`client` 又以 `condition: service_healthy` 依赖它。
+      operationId: getHealth
+      responses:
+        '200':
+          description: 自检全部通过。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                ok:
+                  summary: 自检通过（status=ok）
+                  value:
+                    status: "ok"
+                    version: "0.1.0"
+                    git_sha: "9f2c1ab"
+                    uptime_s: 42
+                    ruleset:
+                      pack_version: "1.0.0"
+                      sha256: "ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890"
+                      count: 42
+                      source: "embedded+external"
+                      loaded_at: "2026-10-19T07:00:00Z"
+                    checks:
+                      engine_selftest:
+                        ok: true
+                        cases: 6
+                        failed: []
+                      ruleset_loaded:
+                        ok: true
+        '503':
+          description: 引擎自检失败或规则集未就绪（`status:"degraded"`）。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                degraded:
+                  $ref: '#/components/examples/DegradedHealth'
+
+components:
+  examples:
+    DegradedHealth:
+      summary: 自检失败（status=degraded，HTTP 503）
+      description: |
+        本例中 `ssh.yaml` 的 `ssh.openssh` 规则被改坏，探针 `ssh.openssh` 不再命中，
+        因此 `checks.engine_selftest.ok=false` 且 `failed` 里给出 `{probe, want, got}`。
+      value:
+        status: "degraded"
+        version: "0.1.0"
+        git_sha: "9f2c1ab"
+        uptime_s: 42
+        ruleset:
+          pack_version: "1.0.0"
+          sha256: "ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890"
+          count: 42
+          source: "embedded+external"
+          loaded_at: "2026-10-19T07:00:00Z"
+        checks:
+          engine_selftest:
+            ok: false
+            cases: 6
+            failed:
+              - probe: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"
+                want: "protocol=SSH product=OpenSSH version=8.9p1"
+                got: "protocol=unknown product= version="
+          ruleset_loaded:
+            ok: true
+
+  schemas:
+
+    # ---------------- 请求 ----------------
+
+    FingerprintRequestItem:
+      type: object
+      description: |
+        单条待识别记录。
+        `banner` 与 `banner_b64` 二者至少提供其一；同时提供时**以 `banner_b64` 为准**
+        （契约按"二选一"描述，服务端对同时出现的输入更宽容）。
+      required: [ip, port]
+      properties:
+        ip:
+          type: string
+          description: 原样回显，不做校验（可能是域名或空串）。
+          example: "1.2.3.4"
+        port:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          description: |
+            观测端口。**仅作弱先验参与加权**（落在规则声明的 `ports` 内最多 +0.05），
+            绝不作为识别前提：非标准端口上的 banner 一样会被识别。
+          example: 22
+        banner:
+          type: string
+          description: |
+            文本形态 banner。匹配前会尽力把 `\xNN` / `\r` / `\n` / `\t` / `\\` / `\0` 还原为真实字节；
+            若还原后全部规则落空，会再用**未解码的原始形态**重跑一遍。
+            含 NUL 或非法 UTF-8 的 banner 建议改用 `banner_b64`（`bannerctl` 会自动切换）。
+          example: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"
+        banner_b64:
+          type: string
+          format: byte
+          description: |
+            `banner` 原始字节的 base64 编码，用于精确二进制输入（如 MySQL 握手包、TLS 记录头）。
+            与 `banner` 同时给出时以本字段为准。
+          example: "SgAAAAo4LjAuMzIA"
+      oneOf:
+        - required: [banner]
+        - required: [banner_b64]
+
+    FingerprintRequestArray:
+      type: array
+      description: 裸数组形态（与任务样例一致的主兼容路径）。空数组合法，返回空结果数组。
+      maxItems: 10000
+      items:
+        $ref: '#/components/schemas/FingerprintRequestItem'
+
+    FingerprintRequestEnvelope:
+      type: object
+      description: 信封形态，便于携带批量元信息。
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: 待识别记录数组；空数组合法。超过 10000 条返回 413。
+          maxItems: 10000
+          items:
+            $ref: '#/components/schemas/FingerprintRequestItem'
+
+    # ---------------- 响应 ----------------
+
+    FingerprintResultItem:
+      type: object
+      description: |
+        单条识别结果，字段名与类型固定为下列 7 个。
+        识别不出时返回 `protocol:"unknown"`，其余字符串字段为空、`confidence` 为 0。
+        结果与请求条目严格 1:1 且顺序一致。
+        另注：`?debug=1` 时会在本对象上附加原始字节诊断字段，那些字段不属于稳定契约。
+      required: [ip, port, protocol, product, version, os_hint, confidence]
+      properties:
+        ip:
+          type: string
+          description: 原样回显请求中的 `ip`。
+          example: "1.2.3.4"
+        port:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 65535
+          description: 原样回显请求中的 `port`。
+          example: 22
+        protocol:
+          type: string
+          description: |
+            识别出的协议名；认不出时为 `unknown`。
+            取值由生效的规则数据决定，**不是代码里的封闭集合**：内置包已知取值为
+            `SSH`、`HTTP`、`FTP`、`MySQL`、`Redis`、`TLS`、`SMTP`、`POP3`、`IMAP`、
+            `Docker Registry`、`Elasticsearch`、`Kibana`、`Memcached`、`VNC`、`Kubernetes API`、`etcd`、`unknown`；
+            经 `--rules-dir` 加载的外部规则包可引入新的协议名，因此本字段不做封闭枚举。
+          example: "SSH"
+        product:
+          type: string
+          description: 规范化产品名（不依赖 banner 原样大小写）；未抽到为空串。
+          example: "OpenSSH"
+        version:
+          type: string
+          description: 版本串；未抽到为空串。注意 TLS 记录头**刻意不报版本**（见 `tlsRecord` 示例）。
+          example: "8.9p1"
+        os_hint:
+          type: string
+          description: OS 提示，来自规则中声明的正则或静态推断；未抽到为空串。
+          example: "Ubuntu"
+        confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: |
+            置信度，`[0, 1]` 区间、保留 2 位小数。
+            计算方式：`round(min(ceiling_applicable, protocol + Σ bonus), 2)`，
+            权重与上限全部声明在规则 YAML 里（默认 `protocol 0.60`、`product 0.15`、`version 0.10`、
+            `os_hint 0.05`、`port_agree 0.05`、`ceiling 0.95`、`ceiling_no_version 0.75`）。
+            规则可覆盖上限，这正是 Redis 只给 0.70（单条内联错误回复可被伪造）、
+            Jetty 只给 0.85（应用可覆盖 `Server` 头）的原因。
+            `unknown` 恒为 0。
+          example: 0.95
+
+    FingerprintResponseArray:
+      type: array
+      description: 默认响应形态：裸数组，与请求条目 1:1 且顺序一致。
+      items:
+        $ref: '#/components/schemas/FingerprintResultItem'
+
+    FingerprintResponseEnvelope:
+      type: object
+      description: '`?envelope=1` 时的响应形态。'
+      required: [results, summary]
+      properties:
+        results:
+          type: array
+          description: 识别结果，与请求条目 1:1 且顺序一致，不增不减。
+          items:
+            $ref: '#/components/schemas/FingerprintResultItem'
+        summary:
+          $ref: '#/components/schemas/FingerprintSummary'
+
+    FingerprintSummary:
+      type: object
+      description: 批量元信息。
+      required: [total, recognized, unknown, elapsed_ms, ruleset]
+      properties:
+        total:
+          type: integer
+          description: 条目总数，等于 `results` 长度。
+          example: 20
+        recognized:
+          type: integer
+          description: 识别成功（`protocol != "unknown"`）的条目数。
+          example: 19
+        unknown:
+          type: integer
+          description: 降级为 `unknown` 的条目数。
+          example: 1
+        elapsed_ms:
+          type: integer
+          format: int64
+          description: 本次批量识别的耗时（毫秒）。
+          example: 4
+        ruleset:
+          $ref: '#/components/schemas/RulesetSummary'
+
+    RulesetSummary:
+      type: object
+      description: 本次请求所用规则包的标识，用于回答"这条结果是由哪一版规则产生的"。
+      required: [pack_version, sha256, count]
+      properties:
+        pack_version:
+          type: string
+          description: 规则包版本，来自 `rules/_pack.yaml`。
+          example: "1.0.0"
+        sha256:
+          type: string
+          description: 规则包内容哈希。
+          example: "ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890"
+        count:
+          type: integer
+          description: 生效的规则条数（含内置与外部覆盖后）。
+          example: 42
+
+    HealthResponse:
+      type: object
+      description: |
+        `/health` 的响应体。`status` 为 `ok` 时 HTTP 200，为 `degraded` 时 HTTP 503。
+      required: [status, version, git_sha, uptime_s, ruleset, checks]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+          description: '`ok` → 200；`degraded` → 503。'
+          example: "ok"
+        version:
+          type: string
+          description: 服务版本（构建期通过 `-ldflags -X` 注入）。
+          example: "0.1.0"
+        git_sha:
+          type: string
+          description: 构建时的 git 提交号（构建期注入）。
+          example: "9f2c1ab"
+        uptime_s:
+          type: integer
+          format: int64
+          description: 进程已运行秒数。
+          example: 42
+        ruleset:
+          $ref: '#/components/schemas/HealthRuleset'
+        checks:
+          $ref: '#/components/schemas/HealthChecks'
+
+    HealthRuleset:
+      type: object
+      description: 当前生效规则包的完整标识。
+      required: [pack_version, sha256, count, source, loaded_at]
+      properties:
+        pack_version:
+          type: string
+          description: 规则包版本，来自 `rules/_pack.yaml`。
+          example: "1.0.0"
+        sha256:
+          type: string
+          description: 规则包内容哈希 —— 任何时刻都能确认"生效的是哪一版规则"。
+          example: "ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890"
+        count:
+          type: integer
+          description: 生效的规则条数（与 `RulesetSummary.count` 同名同义）。
+          example: 42
+        source:
+          type: string
+          enum: [embedded, external, "embedded+external"]
+          description: |
+            规则来源：`embedded` 全部来自二进制内嵌的默认包；
+            `external` 全部来自 `--rules-dir` 指定的外部目录；
+            `embedded+external` 混合（外部同名 pack 整文件替换内置同名 pack，新 pack 追加）。
+          example: "embedded+external"
+        loaded_at:
+          type: string
+          format: date-time
+          description: 当前规则集加载完成的时刻（UTC）。
+          example: "2026-10-19T07:00:00Z"
+
+    HealthChecks:
+      type: object
+      description: 各项检查结果。
+      required: [engine_selftest, ruleset_loaded]
+      properties:
+        engine_selftest:
+          $ref: '#/components/schemas/EngineSelftest'
+        ruleset_loaded:
+          $ref: '#/components/schemas/SimpleCheck'
+
+    EngineSelftest:
+      type: object
+      description: |
+        引擎自检：每次请求实时用内置探针 banner 跑一遍识别并断言结果。
+        这是"健康"的真正含义 —— 检查识别能力，而不是检查进程还在。
+      required: [ok, cases, failed]
+      properties:
+        ok:
+          type: boolean
+          description: 6 条探针是否全部符合预期。
+          example: true
+        cases:
+          type: integer
+          description: 探针条数（内置 6 条，覆盖 SSH / HTTP / MySQL / Redis / FTP / TLS）。
+          example: 6
+        failed:
+          type: array
+          description: 未通过的探针明细；全部通过时为空数组。
+          items:
+            $ref: '#/components/schemas/SelftestFailure'
+
+    SelftestFailure:
+      type: object
+      description: 单条探针的失败明细。
+      required: [probe, want, got]
+      properties:
+        probe:
+          type: string
+          description: 探针 banner（原始形态）。
+          example: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3"
+        want:
+          type: string
+          description: 期望结果摘要。
+          example: "protocol=SSH product=OpenSSH version=8.9p1"
+        got:
+          type: string
+          description: 实际结果摘要。
+          example: "protocol=unknown product= version="
+
+    SimpleCheck:
+      type: object
+      description: 无额外明细的布尔检查项。
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      description: 统一错误响应体。注意：**单条 item 识别失败不产生此响应**，那种情况仍是 200。
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code]
+          properties:
+            code:
+              type: string
+              enum: [invalid_request, payload_too_large, unsupported_media_type, internal]
+              description: |
+                `invalid_request` → 400；`payload_too_large` → 413；
+                `unsupported_media_type` → 415；`internal` → 500。
+            message:
+              type: string
+              description: 人类可读的说明。500 的响应体可能只有 `code` 与 `request_id`。
+              example: "request body is not valid JSON: unexpected end of JSON input"
+            request_id:
+              type: string
+              description: 请求标识，仅在 500 时给出，便于把响应与日志对上。
+              example: "6f1c2a0e3b7d4a55"
