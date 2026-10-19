@@ -1,0 +1,29 @@
+version: 1
+pack: redis
+protocol: Redis
+ports: [6379, 6380, 16379, 26379]
+rules:
+  # 例：#5 「-ERR wrong number of arguments for 'get' command」
+  #     #12 「+PONG」
+  #     #18 「-NOAUTH Authentication required.」
+  #   -> 一律 Redis / Redis / "" / 0.70
+  #
+  # 上限压到 0.70 的理由：单条内联回复（RESP simple string / error）
+  # 没有任何版本信息可交叉验证，而且极易被伪造或由中间设备产生。
+  # 因此宁可诚实地上限低一档，也不给出一个撑不住的 0.80。
+  - id: redis.inline_reply
+    description: "RESP 内联回复（Simple String / Error / Integer / Array 头）"
+    specificity: 80
+    match:
+      - regex: '^(?:\+PONG\b|\+OK\b|-ERR\b|-NOAUTH\b|-WRONGTYPE\b|-MOVED\b|-ASK\b|-LOADING\b|-READONLY\b|-DENIED\b|-NOPROTO\b|-BUSY\b|\*[0-9]+\r?\n|:[0-9]+\r?\n)'
+    product: Redis
+    score: {ceiling: 0.70, ceiling_no_version: 0.70}
+
+  # 有些扫描器会发 INFO 并拿到 # Server 段落，这里能进一步吃到版本号。
+  - id: redis.info
+    description: "redis INFO 输出中的 Server 段落"
+    specificity: 92
+    match:
+      - regex: '(?m)^redis_version:(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: Redis
+    score: {ceiling: 0.90, ceiling_no_version: 0.70}

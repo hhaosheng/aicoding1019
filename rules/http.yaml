@@ -1,0 +1,102 @@
+version: 1
+pack: http
+protocol: HTTP
+ports: [80, 81, 88, 443, 591, 8000, 8008, 8080, 8081, 8088, 8443, 8888, 9000, 9090, 9443, 10443]
+rules:
+  - id: http.nginx
+    specificity: 90
+    match:
+      - regex: '(?mi)^Server:\s*nginx/(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: nginx
+    os_hint:
+      - {regex: '(?i)\(ubuntu\)', value: Ubuntu}
+      - {regex: '(?i)\(debian\)', value: Debian}
+      - {regex: '(?i)\(centos\)', value: CentOS}
+    score: {ceiling: 0.95, ceiling_no_version: 0.75}
+
+  - id: http.openresty
+    specificity: 91
+    match:
+      - regex: '(?mi)^Server:\s*openresty/(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: OpenResty
+    score: {ceiling: 0.90, ceiling_no_version: 0.75}
+
+  - id: http.apache
+    specificity: 90
+    match:
+      - regex: '(?mi)^Server:\s*Apache/(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: Apache
+    os_hint:
+      - {regex: '(?i)\(ubuntu\)', value: Ubuntu}
+      - {regex: '(?i)\(debian\)', value: Debian}
+      - {regex: '(?i)\(centos\)', value: CentOS}
+      - {regex: '(?i)\(win32\)', value: Windows}
+    score: {ceiling: 0.95, ceiling_no_version: 0.75}
+
+  - id: http.jetty
+    specificity: 90
+    match:
+      - regex: '(?mi)^Server:\s*Jetty(?:\((?P<extra>[^)]*)\))?/(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: Jetty
+    # Jetty 允许应用覆盖 Server 头，版本串可信度天然低一档 -> 上限 0.85。
+    # 调这个数只需改这一行 YAML，不必动 Go。
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: http.iis
+    specificity: 90
+    match:
+      - regex: '(?mi)^Server:\s*Microsoft-IIS/(?P<version>[0-9][0-9.]*)'
+    product: Microsoft-IIS
+    os_hint: [{value: Windows}]   # 静态推断：IIS 只跑在 Windows 上
+    score: {ceiling: 0.95, ceiling_no_version: 0.75}
+
+  - id: http.tomcat
+    description: "Tomcat 的 HTTP/1.0 连接器默认暴露 Apache-Coyote"
+    specificity: 88
+    match:
+      - regex: '(?mi)^Server:\s*Apache-Coyote/(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: Apache Tomcat
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: http.lighttpd
+    specificity: 88
+    match:
+      - regex: '(?mi)^Server:\s*lighttpd/(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: lighttpd
+    score: {ceiling: 0.90, ceiling_no_version: 0.75}
+
+  - id: http.caddy
+    specificity: 88
+    match:
+      - regex: '(?mi)^Server:\s*Caddy(?:/(?P<version>[0-9][0-9A-Za-z.\-]*))?'
+    product: Caddy
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: http.gunicorn
+    specificity: 86
+    match:
+      - regex: '(?mi)^Server:\s*gunicorn(?:/(?P<version>[0-9][0-9A-Za-z.\-]*))?'
+    product: gunicorn
+    score: {ceiling: 0.80, ceiling_no_version: 0.70}
+
+  - id: http.werkzeug
+    description: "Flask 开发服务器"
+    specificity: 86
+    match:
+      - regex: '(?mi)^Server:\s*Werkzeug/(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: Werkzeug
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: http.litespeed
+    specificity: 88
+    match:
+      - regex: '(?mi)^Server:\s*LiteSpeed(?:/(?P<version>[0-9][0-9A-Za-z.\-]*))?'
+    product: LiteSpeed
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  # 兜底：认得出是 HTTP，但认不出实现。这是「unknown 不等于错」的关键一环 ——
+  # 协议层仍然给出了有用信息，所以给 0.60 而不是 0。
+  - id: http.generic
+    specificity: 10
+    match: [{regex: '^HTTP/[0-9]\.[0-9] \d{3}\b'}]
+    score: {ceiling: 0.60, ceiling_no_version: 0.60}

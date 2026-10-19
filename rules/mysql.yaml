@@ -1,0 +1,37 @@
+version: 1
+pack: mysql
+protocol: MySQL
+ports: [3306, 3307, 13306, 33060]
+rules:
+  # 例：#4 「J\x00\x00\x00\n8.0.32\x00」-> MySQL / MySQL / 8.0.32 / 0.90
+  #
+  # 这是二进制协议：Greeting 包结构为
+  #   3B 包长 | 1B 序号 | 1B 协议版本(0x0A) | NUL 结尾的版本串 | ...
+  # 所以用 (?s) 让 . 能跨 NUL，并用 \x0a 按字节定位。
+  # 注意：banner 原文里的 "\x00" 既可能是 JSON 真字节（\u0000），
+  # 也可能是字面量四字符 "\x00"，两种形态都由 internal/banner 的双模解码统一成真字节。
+  - id: mysql.greeting
+    description: "MySQL 握手包 Greeting（位置严格）"
+    specificity: 95
+    match:
+      - regex: '(?s)^.{4}\x0a(?P<version>[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.\-]*)'
+    product: MySQL
+    score: {ceiling: 0.90, ceiling_no_version: 0.70}
+
+  # banner 可能被上游扫描器截断，放宽位置要求：只要见到
+  # 0x0A + 版本串 + NUL 这个组合就认。
+  - id: mysql.greeting_loose
+    description: "MySQL 握手包 Greeting（位置宽松，容忍截断）"
+    specificity: 70
+    match:
+      - regex: '(?s)\x0a(?P<version>[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.\-]*)\x00'
+    product: MySQL
+    score: {ceiling: 0.85, ceiling_no_version: 0.65}
+
+  # 同样结构，但版本串里带 -MariaDB 后缀。特异性更高，优先命中。
+  - id: mysql.mariadb
+    specificity: 96
+    match:
+      - regex: '(?s)\x0a(?P<version>[0-9][0-9A-Za-z.\-]*-MariaDB[0-9A-Za-z.\-]*)'
+    product: MariaDB
+    score: {ceiling: 0.90, ceiling_no_version: 0.70}

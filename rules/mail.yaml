@@ -1,0 +1,68 @@
+# SMTP / POP3 / IMAP —— 超出任务必答范围，属于低成本增加识别深度。
+version: 1
+pack: mail
+protocol: SMTP
+ports: [25, 110, 143, 465, 587, 993, 995, 2525]
+rules:
+  - id: smtp.exim
+    protocol: SMTP
+    specificity: 82
+    match:
+      - regex: '(?mi)^220[\s\-]'
+      - regex: '(?i)\bExim\b\s*(?P<version>[0-9][0-9A-Za-z.\-]*)?'
+    product: Exim
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: smtp.postfix
+    protocol: SMTP
+    specificity: 82
+    match:
+      - regex: '(?mi)^220[\s\-]'
+      - regex: '(?i)\bPostfix\b'
+    product: Postfix
+    score: {ceiling: 0.80, ceiling_no_version: 0.70}
+
+  - id: smtp.sendmail
+    protocol: SMTP
+    specificity: 82
+    match:
+      - regex: '(?mi)^220[\s\-]'
+      - regex: '(?i)\bSendmail\b\s*(?P<version>[0-9][0-9A-Za-z.\-]*)?'
+    product: Sendmail
+    score: {ceiling: 0.80, ceiling_no_version: 0.70}
+
+  - id: smtp.generic
+    protocol: SMTP
+    specificity: 55
+    match: [{regex: '(?mi)^220[\s\-].*(?:ESMTP|SMTP)'}]
+    score: {ceiling: 0.70, ceiling_no_version: 0.65}
+
+  - id: pop3.dovecot
+    protocol: POP3
+    specificity: 80
+    match:
+      - regex: '(?mi)^\+OK\b'
+      - regex: '(?i)\bDovecot\b'
+    product: Dovecot
+    score: {ceiling: 0.80, ceiling_no_version: 0.70}
+
+  - id: pop3.generic
+    protocol: POP3
+    specificity: 58
+    match: [{regex: '(?mi)^\+OK\b'}]
+    score: {ceiling: 0.65, ceiling_no_version: 0.60}
+
+  - id: imap.dovecot
+    protocol: IMAP
+    specificity: 80
+    match:
+      - regex: '(?mi)^\* OK\b'
+      - regex: '(?i)\bDovecot\b'
+    product: Dovecot
+    score: {ceiling: 0.80, ceiling_no_version: 0.70}
+
+  - id: imap.generic
+    protocol: IMAP
+    specificity: 58
+    match: [{regex: '(?mi)^\* OK\b'}]
+    score: {ceiling: 0.65, ceiling_no_version: 0.60}

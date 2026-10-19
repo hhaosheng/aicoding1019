@@ -1,0 +1,45 @@
+version: 1
+pack: ssh
+protocol: SSH
+# 协议级端口先验：规则未单独声明 ports 时继承这里
+ports: [22, 2222, 2022, 8022, 10022]
+rules:
+  # 例：#1 「SSH-2.0-OpenSSH_8.9p1 Ubuntu-3」
+  #   -> SSH / OpenSSH / 8.9p1 / Ubuntu，置信度 0.95
+  - id: ssh.openssh
+    description: "OpenSSH 标识串（RFC 4253 §4.2）"
+    specificity: 100
+    match:
+      - regex: '^SSH-(?P<sshver>[0-9]\.[0-9]{1,2})-(?P<product>OpenSSH)[-_](?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: OpenSSH
+    os_hint:
+      - {regex: '(?i)\bubuntu\b', value: Ubuntu}
+      - {regex: '(?i)\bdebian\b', value: Debian}
+      - {regex: '(?i)\bfreebsd\b', value: FreeBSD}
+      - {regex: '(?i)\bcentos\b', value: CentOS}
+      - {regex: '(?i)\brhel\b', value: Red Hat}
+      - {regex: '(?i)\balpine\b', value: Alpine}
+    score: {ceiling: 0.95, ceiling_no_version: 0.80}
+
+  - id: ssh.dropbear
+    description: "Dropbear SSH"
+    specificity: 95
+    match:
+      - regex: '^SSH-[0-9]\.[0-9]{1,2}-dropbear(?:_(?P<version>[0-9][0-9A-Za-z.\-]*))?'
+    product: Dropbear
+    score: {ceiling: 0.90, ceiling_no_version: 0.75}
+
+  - id: ssh.cisco
+    description: "Cisco SSH 标识串"
+    specificity: 92
+    match:
+      - regex: '^SSH-[0-9]\.[0-9]{1,2}-Cisco-(?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: Cisco SSH
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  # 兜底：任何符合 RFC 4253 的标识串，即使不认识具体实现也能定协议
+  - id: ssh.generic
+    specificity: 50
+    match:
+      - regex: '^SSH-(?P<sshver>[0-9]\.[0-9]{2})-(?P<product>[^\s_-]+)'
+    score: {ceiling: 0.85, ceiling_no_version: 0.75}

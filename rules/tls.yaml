@@ -1,0 +1,39 @@
+version: 1
+pack: tls
+protocol: TLS
+# 刻意不声明 ports：TLS 可以出现在任意端口上（本例 #16 就在 9999），
+# 声明端口只会制造一个假的「端口相符 +0.05」先验。
+rules:
+  # 例：#16 「\x16\x03\x01\x00\xa5\x01\x00\x00\xa1」
+  #   -> TLS / "" / "" / 0.60
+  #
+  # 设计取舍：record 头里的 03 01 是 record version，在 ClientHello 上几乎
+  # 恒为 legacy 值，**不代表协商出的版本**。所以这里不抽 version，
+  # 只认到 record 层，置信度封顶 0.60 —— 宁可低分也不给假信息。
+  - id: tls.handshake_clienthello
+    description: "TLS record: Handshake / ClientHello"
+    specificity: 85
+    match:
+      - regex: '^\x16\x03[\x00-\x04][\x00-\xff]{2}[\x01\x02]'
+    score: {ceiling: 0.60, ceiling_no_version: 0.60}
+
+  - id: tls.handshake_serverhello
+    description: "TLS record: Handshake / ServerHello"
+    specificity: 86
+    match:
+      - regex: '^\x16\x03[\x00-\x04][\x00-\xff]{2}\x02'
+    score: {ceiling: 0.60, ceiling_no_version: 0.60}
+
+  - id: tls.alert
+    description: "TLS record: Alert（服务端拒绝握手时的常见响应）"
+    specificity: 45
+    match:
+      - regex: '^\x15\x03[\x00-\x04]'
+    score: {ceiling: 0.55, ceiling_no_version: 0.55}
+
+  - id: tls.record
+    description: "任意 TLS record 头：只能定到 record 层"
+    specificity: 40
+    match:
+      - regex: '^\x16\x03[\x00-\x04]'
+    score: {ceiling: 0.55, ceiling_no_version: 0.55}

@@ -1,0 +1,65 @@
+# 跨协议兜底：只放「不属于某个专门 pack」的识别点。
+#
+# 这里的 pack 级 score 刻意压得很低（这是「弱证据」的默认姿态），
+# 单条规则认为自己足够可靠时用规则级 score 覆盖 —— 又是一处「改 YAML 不改代码」。
+version: 1
+pack: generic
+description: "跨协议弱关键词兜底"
+score: {ceiling: 0.55, ceiling_no_version: 0.45}
+rules:
+  - id: generic.docker_registry
+    protocol: Docker Registry
+    specificity: 75
+    match:
+      - regex: '(?i)\bDocker-Distribution-Api-Version\b'
+    product: Docker Registry
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: generic.elasticsearch
+    protocol: Elasticsearch
+    specificity: 78
+    match:
+      - regex: '(?i)"tagline"\s*:\s*"You Know, for Search"'
+    product: Elasticsearch
+    score: {ceiling: 0.90, ceiling_no_version: 0.70}
+
+  - id: generic.kibana
+    protocol: Kibana
+    specificity: 76
+    match:
+      - regex: '(?i)"(?:kbn-name|kbn-version)"\s*:'
+    product: Kibana
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: generic.memcached
+    protocol: Memcached
+    specificity: 76
+    match:
+      - regex: '^(?:VERSION\s+(?P<version>[0-9][0-9A-Za-z.\-]*)\r?\n|ERROR\r?\n|CLIENT_ERROR\b|SERVER_ERROR\b)'
+    product: Memcached
+    score: {ceiling: 0.80, ceiling_no_version: 0.65}
+
+  - id: generic.vnc
+    protocol: VNC
+    specificity: 90
+    match:
+      - regex: '^RFB (?P<version>[0-9]{3}\.[0-9]{3})\n'
+    product: VNC
+    score: {ceiling: 0.90, ceiling_no_version: 0.75}
+
+  - id: generic.kubernetes_api
+    protocol: Kubernetes API
+    specificity: 80
+    match:
+      - regex: '(?i)^HTTP/[0-9.]+ \d{3}'
+      - regex: '(?i)"kind"\s*:\s*"(?:Status|PodList|NodeList|ServiceList)"'
+    product: Kubernetes API
+    score: {ceiling: 0.75, ceiling_no_version: 0.65}
+
+  - id: generic.etcd
+    protocol: etcd
+    specificity: 78
+    match:
+      - regex: '(?i)"etcdserver"\s*:'
+    product: etcd
+    score: {ceiling: 0.85, ceiling_no_version: 0.65}

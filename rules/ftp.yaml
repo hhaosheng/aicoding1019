@@ -1,0 +1,65 @@
+version: 1
+pack: ftp
+protocol: FTP
+ports: [21, 2121, 8021, 10021]
+rules:
+  # 例：#6 「220 ProFTPD 1.3.7 Server (ProFTPD)」-> FTP / ProFTPD / 1.3.7 / 0.90
+  #
+  # 本规则刻意不写 score：它继承 pack 级、再继承 _pack.yaml 基线的
+  # ceiling 0.95 / ceiling_no_version 0.75。少写一处即少一处出错的可能。
+  - id: ftp.proftpd
+    specificity: 90
+    match:
+      - regex: '^220[\s\-]'
+      - regex: '(?i)\bProFTPD[ /](?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: ProFTPD
+
+  # 例：#13 「220 (vsFTPd 3.0.5)」-> FTP / vsftpd / 3.0.5
+  - id: ftp.vsftpd
+    specificity: 90
+    match:
+      - regex: '^220[\s\-]'
+      - regex: '(?i)\(?vsftpd[ /](?P<version>[0-9][0-9A-Za-z.\-]*)'
+    product: vsftpd
+    tags: [vsftpd]
+
+  # 例：#19 「220 Welcome to Pure-FTPd」-> FTP / Pure-FTPd / "" / 0.75
+  # 没有版本号，于是被 ceiling_no_version 压到 0.75 —— 与示例期望一致。
+  - id: ftp.pureftpd
+    specificity: 88
+    match:
+      - regex: '^220[\s\-]'
+      - regex: '(?i)\bPure-?FTPd\b(?:\s+(?P<version>[0-9][0-9A-Za-z.\-]*))?'
+    product: Pure-FTPd
+    score: {ceiling: 0.95, ceiling_no_version: 0.75}
+
+  - id: ftp.wuftpd
+    specificity: 85
+    match:
+      - regex: '^220[\s\-]'
+      - regex: '(?i)\bwu-?ftpd\b(?:\s+(?P<version>[0-9][0-9A-Za-z.\-]*))?'
+    product: wu-ftpd
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: ftp.filezilla
+    specificity: 85
+    match:
+      - regex: '^220[\s\-]'
+      - regex: '(?i)\bFileZilla Server\b(?:\s+(?P<version>[0-9][0-9A-Za-z.\-]*))?'
+    product: FileZilla Server
+    score: {ceiling: 0.85, ceiling_no_version: 0.70}
+
+  - id: ftp.microsoft
+    specificity: 85
+    match:
+      - regex: '^220[\s\-]'
+      - regex: '(?i)\bMicrosoft FTP Service\b'
+    product: Microsoft FTP Service
+    os_hint: [{value: Windows}]
+    score: {ceiling: 0.85, ceiling_no_version: 0.75}
+
+  # 兜底：只认到「这是 FTP 的 220 问候」为止。
+  - id: ftp.generic
+    specificity: 10
+    match: [{regex: '^220[\s\-]'}]
+    score: {ceiling: 0.60, ceiling_no_version: 0.60}
