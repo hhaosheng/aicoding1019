@@ -26,9 +26,14 @@ LDFLAGS    := -s -w -X main.version=$(VERSION) -X main.gitSHA=$(GIT_SHA)
 GOBUILD    := $(GO) build -trimpath -buildvcs=false -tags '$(BUILD_TAGS)' -ldflags '$(LDFLAGS)'
 GOSRC      := ./cmd ./internal
 
-# 验收脚本按平台分发：Windows 用 PowerShell，其余用 bash
+# 验收脚本按平台分发：Windows 用 PowerShell，其余用 bash。
+#
+# 这里刻意用 powershell.exe 而不是 pwsh：前者是 Windows 自带组件，任何 Windows 上
+# 都存在；PowerShell 7（pwsh）是可选的，很多机器上并没有装（本项目的开发机就没有，
+# 只有 5.1）。scripts/verify.ps1 用 `#Requires -Version 5.1` 声明了最低版本，
+# 两个版本都能跑，所以选"一定存在"的那个，而不是"通常更好"的那个。
 ifeq ($(OS),Windows_NT)
-VERIFY_CMD := pwsh -NoProfile -File ./scripts/verify.ps1
+VERIFY_CMD := powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify.ps1
 else
 VERIFY_CMD := ./scripts/verify.sh
 endif
