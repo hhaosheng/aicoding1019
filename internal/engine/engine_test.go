@@ -290,6 +290,24 @@ func TestScoreModelMatchesPlan(t *testing.T) {
 		}
 	})
 
+	t.Run("Jetty 的两种 Server 头写法都认", func(t *testing.T) {
+		// 老式 Jetty 发 "Jetty/9.4.51"，现代 Jetty 默认发 "Jetty(11.0.24)"。
+		// 两种写法必须落到同一个 product，版本号取分隔符后面那一段。
+		// （这条是拿真实 banner 跑 demo 时发现漏网的：原正则只认斜杠形式。）
+		for _, tc := range []struct{ banner, want string }{
+			{"HTTP/1.1 404 Not Found\r\nServer: Jetty/9.4.51", "9.4.51"},
+			{"HTTP/1.1 200 OK\r\nServer: Jetty(11.0.24)", "11.0.24"},
+			{"HTTP/1.1 200 OK\r\nServer: Jetty (12.0.15)", "12.0.15"},
+			{"HTTP/1.1 200 OK\r\nServer: Jetty(9.4.51.v20230217)", "9.4.51.v20230217"},
+		} {
+			got := eng.Fingerprint(engine.Item{IP: "x", Port: 8080, Banner: tc.banner})
+			if got.Product != "Jetty" || got.Version != tc.want {
+				t.Errorf("%q -> product=%q version=%q，期望 Jetty/%s",
+					tc.banner, got.Product, got.Version, tc.want)
+			}
+		}
+	})
+
 	t.Run("TLS 不给假版本号", func(t *testing.T) {
 		// 03 01 是 record version（ClientHello 上的 legacy 值），不代表协商版本。
 		// 宁可低分也不编一个版本出来。

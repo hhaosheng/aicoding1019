@@ -36,7 +36,11 @@ rules:
   - id: http.jetty
     specificity: 90
     match:
-      - regex: '(?mi)^Server:\s*Jetty(?:\((?P<extra>[^)]*)\))?/(?P<version>[0-9][0-9A-Za-z.\-]*)'
+      # Jetty 的 Server 头有两种真实写法，都要认：
+      #   Server: Jetty/9.4.51                  （老式，样例里就是这种）
+      #   Server: Jetty(11.0.24)                （现代默认，括号里就是版本号）
+      # [/(] 同时接受两种分隔符，版本号统一落在同一个命名组里。
+      - regex: '(?mi)^Server:\s*Jetty\s*[/(]\s*(?P<version>[0-9][0-9A-Za-z.\-]*)'
     product: Jetty
     # Jetty 允许应用覆盖 Server 头，版本串可信度天然低一档 -> 上限 0.85。
     # 调这个数只需改这一行 YAML，不必动 Go。

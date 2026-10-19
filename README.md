@@ -533,6 +533,7 @@ docker compose down -v
 ├── rules/    _pack.yaml ssh.yaml http.yaml ftp.yaml mysql.yaml
 │             redis.yaml tls.yaml mail.yaml generic.yaml
 ├── testdata/ sample_input.json  sample_input_loose.json  expected_20.json
+│             demo_input.json   # 抓着录的真实 banner（含 Jetty(11.0.24)、Postfix 等）
 ├── examples/ rules-override/   # 「换规则不换代码」的演示规则目录
 └── scripts/  verify.ps1  verify.sh
 ```
